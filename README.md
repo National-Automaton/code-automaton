@@ -178,6 +178,37 @@ Note: `ANTHROPIC_BASE_URL` is intentionally **not** read. Anthropic-shaped URLs
 fail; only the *key* is borrowed from `ANTHROPIC_API_KEY`, so pair it with an
 explicit `CODA_BASE_URL` if you rely on that fallback.
 
+## Releasing
+
+Releases are staged by CI on a version tag, then approved by hand:
+
+```bash
+npm version patch          # or minor / major
+git push && git push origin v$(node -p "require('./package.json').version")
+```
+
+CI builds, checks the tag matches `package.json`, smoke-tests the artifact and
+runs `npm stage publish --provenance`. It also creates a GitHub release.
+
+Then approve the staged version in the **npm web UI** (account → Staged
+packages). That approval is the 2FA proof-of-presence, so it stays manual — and
+it is why the CI token needs no 2FA bypass. Once approved, mark the release
+Latest:
+
+```bash
+gh release edit v1.2.2 --latest
+```
+
+The release is created with `--latest=false` because a staged version is not
+installable yet; "Latest" should follow what npm actually serves.
+
+Before deciding to reuse a version number, check the **per-version** endpoint —
+the top-level package document is cached and can lag:
+
+```bash
+curl -s https://registry.npmjs.org/code-automaton/<version>
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

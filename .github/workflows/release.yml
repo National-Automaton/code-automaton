@@ -15,9 +15,15 @@ name: Release
 #
 # To release: bump the version, commit, push, then push a matching tag.
 #   npm version patch && git push && git push origin v1.0.3
-# CI stages it; then approve:
-#   npm stage list
-#   npm stage approve <stage-id>      # prompts for your OTP
+# CI stages it. Then approve the staged version in the npm web UI (account ->
+# Staged packages); that step is the 2FA proof-of-presence, so it stays manual.
+# Approving via CLI also works (`npm stage approve <stage-id>`) but is not
+# required.
+#
+# After approving, mark the GitHub release Latest:
+#   gh release edit <tag> --latest
+# The release is created below with --latest=false, because a staged version is
+# not installable yet and "Latest" should track what npm actually serves.
 
 on:
   push:
@@ -89,10 +95,10 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
-            --notes "Staged on npm; approve with: npm stage list && npm stage approve <stage-id>" \
+            --notes "Staged on npm. Approve it in the npm web UI (account -> Staged packages), then mark this release Latest with gh release edit ${GITHUB_REF_NAME} --latest." \
             --latest=false
 
       - name: Note that approval is manual
         if: success()
         run: |
-          echo "::notice::Staged ${GITHUB_REF_NAME}. Approve it with: npm stage list && npm stage approve <stage-id>"
+          echo "::notice::Staged ${GITHUB_REF_NAME}. Approve it in the npm web UI, then: gh release edit ${GITHUB_REF_NAME} --latest"
