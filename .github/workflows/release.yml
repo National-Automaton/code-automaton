@@ -1,0 +1,73 @@
+name: Release
+
+# Stage a release on npm when a version tag is pushed, then approve it by hand.
+#
+# Staged publishing defers proof-of-presence (2FA) to the approval step, so the
+# CI token never needs a publish-bypass. That matters because npm is removing
+# 2FA-bypass tokens for direct publishing in January 2027; this flow does not
+# depend on them. CI still gets to run the build and attach provenance, and the
+# actual publish stays gated on a human with an authenticator.
+#
+# One-time setup:
+#   1. Create the NPM_TOKEN secret: a granular access token with read/write on
+#      this package. It does NOT need "bypass 2FA" -- staging is not gated on it.
+#   2. Settings -> Actions -> General -> Workflow permissions: allow read/write.
+#
+# To release: bump the version, commit, push, then push a matching tag.
+#   npm version patch && git push && git push origin v1.0.3
+# CI stages it; then approve:
+#   npm stage list
+#   npm stage approve <stage-id>      # prompts for your OTP
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write # required for provenance
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # `npm ci` runs the `prepare` script, which builds dist/. The published
+      # package ships dist/ rather than src/, so a stale build would stage code
+      # that does not match the tag.
+      - run: npm ci
+
+      # Guard against staging a tag that does not match package.json: the tag is
+      # the source of truth for what users will download.
+      - name: Verify tag matches package.json
+        run: |
+          PKG_VERSION="v$(node -p "require('./package.json').version")"
+          if [ "$PKG_VERSION" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json (${PKG_VERSION})"
+            exit 1
+          fi
+
+      - name: Smoke test the built artifact
+        run: |
+          node dist/index.js --version
+          # The published tarball must contain the compiled output.
+          npm pack --dry-run 2>&1 | grep -q "dist/index.js"
+
+      # Staged, not published: this lands in npm's staging area and waits for a
+      # human to approve it. Provenance is attached here, at build time.
+      - name: Stage the release
+        run: npm stage publish . --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Note that approval is manual
+        if: success()
+        run: |
+          echo "::notice::Staged ${GITHUB_REF_NAME}. Approve it with: npm stage list && npm stage approve <stage-id>"
