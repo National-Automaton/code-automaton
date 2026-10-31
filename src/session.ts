@@ -2,6 +2,7 @@ import { Agent, AgentEvent } from "./agent.js";
 import type { AttachedImage } from "./image.js";
 import { Config } from "./config.js";
 import {
+  DEFAULT_TITLE,
   Entry,
   SessionRecord,
   deriveTitle,
@@ -34,7 +35,7 @@ export class Session {
     this.entries = rec?.entries ?? [];
     this.createdAt = rec?.createdAt ?? Date.now();
     this.updatedAt = rec?.updatedAt ?? Date.now();
-    this.title = rec?.title ?? "new session";
+    this.title = rec?.title ?? DEFAULT_TITLE;
     this.agent = new Agent(config, rec?.messages);
   }
 
@@ -65,7 +66,7 @@ export class Session {
     this.entries.push({ role: "user", text: label });
     // Give an untitled session its title from the first user message. Existing
     // titles are left alone so a long-running session keeps its identity.
-    if (this.title === "new session") {
+    if (this.title === DEFAULT_TITLE) {
       this.title = deriveTitle([{ role: "user", content: input }]);
     }
     onUpdate();
@@ -141,6 +142,18 @@ export class Session {
       messages: this.agent.messages,
       entries: this.entries,
     };
+  }
+
+  /**
+   * Give the session a user-chosen title. Clearing it to the default title
+   * re-arms auto-titling, so the next turn names the session from its first
+   * message again.
+   */
+  async rename(title: string): Promise<void> {
+    const trimmed = title.trim();
+    this.title = trimmed || DEFAULT_TITLE;
+    this.updatedAt = Date.now();
+    await this.persist();
   }
 
   async persist(): Promise<void> {

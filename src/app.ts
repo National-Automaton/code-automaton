@@ -18,10 +18,16 @@ export class App {
   private input = new LineBuffer();
   /**
    * Picker state. `confirmDelete` holds the id of the session awaiting a
-   * delete confirmation, so a stray `d` can't destroy a session.
+   * delete confirmation, so a stray `d` can't destroy a session. `rename` is
+   * non-null while a title is being edited: it holds the target session and
+   * the edit buffer, which starts pre-filled with the current title.
    */
-  private picker: { index: number; query: LineBuffer; confirmDelete: string | null } | null =
-    null;
+  private picker: {
+    index: number;
+    query: LineBuffer;
+    confirmDelete: string | null;
+    rename: { id: string; buffer: LineBuffer } | null;
+  } | null = null;
   /** Lines scrolled back from the tail of the transcript. */
   private scroll = 0;
   private screen = new Screen();
@@ -34,9 +40,14 @@ export class App {
   constructor(private config: Config) {}
 
   async start(): Promise<void> {
+    // History is loaded newest-first, but new sessions are appended -- so the
+    // last index is the *oldest* stored record, not the newest one. Rather than
+    // guess, start on a fresh session: opening one you did not pick (and were
+    // then typing into) was the wrong default. Past sessions stay one keypress
+    // away via the picker, which Esc returns from to this new session.
     const records = await loadAll();
     for (const rec of records) this.sessions.push(new Session(this.config, rec));
-    if (this.sessions.length === 0) this.sessions.push(new Session(this.config));
+    this.sessions.push(new Session(this.config));
     this.active = this.sessions.length - 1;
 
     this.screen.start();
@@ -100,6 +111,13 @@ export class App {
             query: this.picker.query.value,
             confirmDelete:
               this.sessions.find((s) => s.id === this.picker?.confirmDelete)?.title ?? null,
+            rename: this.picker.rename
+              ? {
+                  title: this.sessions.find((s) => s.id === this.picker!.rename!.id)?.title ?? "",
+                  value: this.picker.rename.buffer.value,
+                  cursor: this.picker.rename.buffer.cursor,
+                }
+              : null,
           }
         : null,
     });
@@ -127,8 +145,79 @@ export class App {
 
   private onKey(k: Key): void {
     if (this.quitting) return;
-    if (this.picker) this.onPickerKey(k);
+    if (this.picker?.rename) this.onRenameKey(k);
+    else if (this.picker) this.onPickerKey(k);
     else this.onChatKey(k);
+  }
+
+  /** Begin editing the highlighted session's title, pre-filled with the current one. */
+  private startRename(session: Session): void {
+    if (!this.picker) return;
+    const buffer = new LineBuffer();
+    buffer.set(session.title);
+    this.picker.rename = { id: session.id, buffer };
+    this.picker.confirmDelete = null;
+  }
+
+  /**
+   * Keys while a title is being edited: Enter saves, Esc cancels, and the rest
+   * are ordinary line editing. Every key is consumed here so a stray `d` during
+   * a rename edits the title instead of deleting the session.
+   */
+  private onRenameKey(k: Key): void {
+    const r = this.picker!.rename!;
+    const b = r.buffer;
+    const target = this.sessions.find((s) => s.id === r.id);
+
+    switch (k.type) {
+      case "enter":
+        this.picker!.rename = null;
+        if (target) void target.rename(b.value);
+        break;
+      case "escape":
+        this.picker!.rename = null; // discard the edit
+        break;
+      case "left":
+        b.left();
+        break;
+      case "right":
+        b.right();
+        break;
+      case "home":
+        b.home();
+        break;
+      case "end":
+        b.end();
+        break;
+      case "backspace":
+        b.backspace();
+        break;
+      case "delete":
+        b.deleteForward();
+        break;
+      case "paste":
+        b.insert(k.text.replace(/\r?\n/g, " "));
+        break;
+      case "alt":
+        if (k.ch === "b") b.wordLeft();
+        else if (k.ch === "f") b.wordRight();
+        else if (k.ch === "d") b.deleteWordRight();
+        else if (k.ch === "backspace") b.deleteWordLeft();
+        break;
+      case "ctrl":
+        if (k.ch === "c") { this.quit(); return; }
+        else if (k.ch === "a") b.home();
+        else if (k.ch === "e") b.end();
+        else if (k.ch === "u") b.deleteToStart();
+        else if (k.ch === "k") b.deleteToEnd();
+        else if (k.ch === "w") b.deleteWordLeft();
+        break;
+      case "char":
+        b.insert(k.ch);
+        break;
+      // up/down/tab/pageup/pagedown have no meaning while editing a title.
+    }
+    this.requestRender();
   }
 
   private onPickerKey(k: Key): void {
@@ -218,6 +307,11 @@ export class App {
         }
         if (k.ch === "d" && q.value === "" && n > 0) {
           p.confirmDelete = items[p.index].id;
+        } else if (k.ch === "r" && q.value === "" && n > 0) {
+          // `r` renames the highlighted session. Outside rename mode it only
+          // acts on an empty prompt, so typing a message that contains "r"
+          // still works.
+          this.startRename(items[p.index]);
         } else {
           q.insert(k.ch);
           this.clampPickerIndex();
@@ -443,6 +537,7 @@ export class App {
       index: Math.max(0, idx),
       query: new LineBuffer(),
       confirmDelete: null,
+      rename: null,
     };
     this.requestRender();
   }

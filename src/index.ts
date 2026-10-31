@@ -46,6 +46,7 @@ Keys:
                     type + Enter  = start a new session with that message
                     ↑/↓ + Enter   = open the highlighted session
                     d             = delete (asks y to confirm)
+                    r             = rename the highlighted session
   Ctrl+T          New session
   Ctrl+X          Close current session
   Ctrl+C          Exit
@@ -72,6 +73,9 @@ Images:
 
 Note: ANTHROPIC_BASE_URL is intentionally ignored. Anthropic-shaped URLs
 (e.g. https://api.deepseek.com/anthropic) are not OpenAI-compatible.
+
+coda starts on a new session. Your saved sessions are listed in the picker
+(← or Ctrl+R) and stay one keypress away.
 
 Sessions are saved to ${SESSIONS_DIR.replace(process.env.HOME ?? "", "~")}
 and reloaded on start.`;

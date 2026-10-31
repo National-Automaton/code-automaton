@@ -53,6 +53,11 @@ export interface RenderState {
     query: string;
     /** Title of the session awaiting delete confirmation, if any. */
     confirmDelete: string | null;
+    /**
+     * Set while a session title is being edited: the session's current title
+     * (for the prompt) and the edit buffer with its caret.
+     */
+    rename: { title: string; value: string; cursor: number } | null;
   } | null;
 }
 
@@ -189,8 +194,9 @@ export class Screen {
     // list shrinks first (down to 0) to keep header + query + hint on screen.
     // Extra rows the wrapped query occupies beyond its first line, so a long
     // message does not push the list off the bottom.
+    const pickerFieldLen = s.picker ? (s.picker.rename?.value.length ?? s.picker.query.length) : 0;
     const pickerQueryExtra = s.picker
-      ? Math.max(0, Math.ceil(s.picker.query.length / Math.max(10, width - 2)) - 1)
+      ? Math.max(0, Math.ceil(pickerFieldLen / Math.max(10, width - 2)) - 1)
       : 0;
     const pickerFixedChrome = 1 + 1 + 6 + pickerQueryExtra; // header + transcript-blank + chrome
     const pickerSpace = s.picker ? Math.max(0, height - pickerFixedChrome - 2) : 0;
@@ -213,6 +219,12 @@ export class Screen {
     const startIdx = Math.max(0, endIdx - viewport);
     const visible = all.slice(startIdx, Math.max(startIdx, endIdx));
     while (visible.length < viewport) visible.unshift("");
+    // A brand-new session has no transcript at all; say what you can do rather
+    // than showing an empty frame. Sits at the top so it is scrolled away by
+    // the first message like any other history.
+    if (all.length === 0 && visible.length > 0) {
+      visible[0] = DIM + "New session. Type a message, or press ← to open a saved one." + RESET;
+    }
 
     const header =
       BOLD +
@@ -235,7 +247,14 @@ export class Screen {
       out.push(DIM + "─".repeat(width) + RESET);
 
       const p = s.picker;
-      out.push(BOLD + "Sessions" + RESET + DIM + " (↑/↓ to move, Enter to open)" + RESET);
+      out.push(
+        BOLD +
+          "Sessions" +
+          RESET +
+          DIM +
+          (s.picker.rename ? " (editing title)" : " (↑/↓ to move, Enter to open)") +
+          RESET
+      );
 
       const listHeight = pickerListHeight;
       const start =
@@ -265,12 +284,20 @@ export class Screen {
       // Typed text becomes the first message of a new session on Enter; it does
       // not filter the list. Wrapped hard so a long message cannot overrun the
       // width and push the rest of the frame down when the terminal soft-wraps.
+      // While renaming, the same field edits the session title instead.
+      const fieldValue = p.rename ? p.rename.value : p.query;
       const queryRowIdx = out.length;
-      const queryRows = wrapHard(p.query, Math.max(10, width - 2));
+      const queryRows = wrapHard(fieldValue, Math.max(10, width - 2));
       for (let i = 0; i < queryRows.length; i++) {
         out.push((i === 0 ? CYAN + "> " + RESET : "  ") + queryRows[i]);
       }
-      if (p.confirmDelete !== null) {
+      if (p.rename) {
+        out.push(
+          DIM +
+            `rename "${p.rename.title}" · Enter save · Esc cancel · empty resets to auto-title` +
+            RESET
+        );
+      } else if (p.confirmDelete !== null) {
         const label =
           p.confirmDelete.length > 40 ? p.confirmDelete.slice(0, 37) + "..." : p.confirmDelete;
         out.push(
@@ -287,7 +314,7 @@ export class Screen {
           DIM +
             "↑/↓ pick · Enter " +
             (p.query ? "start new session" : "open session") +
-            " · d delete · Esc cancel" +
+            " · d delete · r rename · Esc cancel" +
             RESET
         );
       }
@@ -298,7 +325,9 @@ export class Screen {
       // Same end-of-row rule as the chat input: when the text exactly fills a
       // row the caret stays on that row rather than jumping to the next.
       const qWidth = Math.max(10, width - 2);
-      const qLen = p.query.length;
+      const qLen = p.rename
+        ? Math.max(0, Math.min(p.rename.cursor, p.rename.value.length))
+        : p.query.length;
       const qAtEnd = qLen > 0 && qLen % qWidth === 0;
       const qRow = qAtEnd ? qLen / qWidth - 1 : Math.floor(qLen / qWidth);
       const qCol = qAtEnd ? qWidth : qLen % qWidth;

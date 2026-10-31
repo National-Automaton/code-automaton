@@ -17,6 +17,13 @@ export const SESSIONS_DIR = (() => {
     : path.join(os.homedir(), ".coda", "sessions");
 })();
 
+/**
+ * Placeholder title for a session that has not been named yet. A session still
+ * carrying this title gets an automatic one from its first user message; once
+ * renamed, the title is left alone (renaming back to this re-arms auto-titling).
+ */
+export const DEFAULT_TITLE = "new session";
+
 /** A single rendered transcript entry (what the user sees). */
 export interface Entry {
   role: "user" | "assistant" | "tool";

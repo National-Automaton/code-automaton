@@ -10,8 +10,10 @@ multiple live sessions per terminal.
 session streams independently: switch away from a busy session and its
 response keeps accumulating, then switch back to see it.
 
-Press **←** (or `Ctrl+R`) at any time to open the session picker. The picker
-has a text prompt:
+`coda` starts on a **new session**, with the cursor already in the input — a
+saved session is never opened for you. Your previous sessions are one keypress
+away: press **←** (or `Ctrl+R`) to open the picker, and `Esc` returns you to the
+new session. The picker has a text prompt:
 
 - **Type a message and press Enter** → starts a brand-new session with that
   message as its first turn.
@@ -37,6 +39,7 @@ has a text prompt:
 | `↑` / `↓` (in picker) | Move through sessions |
 | `Enter` with nothing typed | **Open** the highlighted session |
 | `d` (in picker) | Delete highlighted session (asks for confirmation) |
+| `r` (in picker) | Rename highlighted session (Enter saves, Esc cancels) |
 | `y` | Confirm deletion (any other key cancels) |
 | `Esc` (in picker) | Cancel |
 | `Ctrl+V` | Attach the clipboard image (image-only clipboard; see [Images](#images)) |
@@ -46,6 +49,21 @@ has a text prompt:
 
 Sessions are saved as JSON in `~/.coda/sessions/` (mode `600`) and reloaded the
 next time you start `coda`.
+
+### Renaming a session
+
+A session names itself after its first message. To rename it, open the picker
+and press **`r`** on the highlighted session: the entry field turns into a
+title editor, pre-filled with the current title.
+
+- **Enter** saves. **Esc** cancels and keeps the old title.
+- `←`/`→`, `Home`/`End`, `Backspace`, and the usual `Ctrl+A`/`Ctrl+E`/`Ctrl+W`
+  and `Alt+B`/`Alt+F`/`Alt+D` editing keys all work while editing.
+- Clearing the title and pressing Enter returns it to auto-titling, so the next
+  message names the session again.
+
+The new title is written to disk immediately and shows in the header and the
+picker.
 
 ## Install
 
