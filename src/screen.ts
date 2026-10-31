@@ -44,8 +44,8 @@ export interface RenderState {
   scrollOffset: number;
   /**
    * When set, the picker overlay is shown instead of the input line.
-   * `query` is the typed filter text; when non-empty, Enter starts a new
-   * session using it.
+   * `query` is the typed text; when non-empty, Enter starts a new session
+   * using it. It does not filter the list.
    */
   picker: {
     items: PickerItem[];
@@ -187,12 +187,17 @@ export class Screen {
     // otherwise the frame overflows and the query line scrolls off-screen.
     // On a very short terminal the chrome alone can exceed the height, so the
     // list shrinks first (down to 0) to keep header + query + hint on screen.
-    const pickerFixedChrome = 1 + 1 + 6; // header + transcript-blank + picker chrome
+    // Extra rows the wrapped query occupies beyond its first line, so a long
+    // message does not push the list off the bottom.
+    const pickerQueryExtra = s.picker
+      ? Math.max(0, Math.ceil(s.picker.query.length / Math.max(10, width - 2)) - 1)
+      : 0;
+    const pickerFixedChrome = 1 + 1 + 6 + pickerQueryExtra; // header + transcript-blank + chrome
     const pickerSpace = s.picker ? Math.max(0, height - pickerFixedChrome - 2) : 0;
     const pickerListHeight = s.picker
       ? Math.max(0, Math.min(s.picker.items.length || 1, Math.floor(height / 3), pickerSpace))
       : 0;
-    const pickerChrome = s.picker ? 6 + pickerListHeight : 0;
+    const pickerChrome = s.picker ? 6 + pickerListHeight + pickerQueryExtra : 0;
     const viewport = s.picker
       ? Math.max(0, height - 2 - pickerChrome)
       : this.viewportRowsFor(s.input, width);
@@ -229,12 +234,17 @@ export class Screen {
       out.push("");
       out.push(DIM + "─".repeat(width) + RESET);
 
-      // Picker prompt: typed text filters, and becomes the first message of a
-      // new session if you press Enter with something typed.
+      // Picker prompt: the typed text becomes the first message of a new
+      // session if you press Enter with something typed. It no longer filters
+      // the list. Wrapped hard so a long message cannot overrun the width and
+      // push the rest of the frame down when the terminal soft-wraps it.
       const p = s.picker;
       out.push(BOLD + "New session" + RESET + DIM + " (type a message, or pick a session below)" + RESET);
-      const queryRowIdx = out.length; // row index of the query line
-      out.push(CYAN + "> " + RESET + p.query);
+      const queryRowIdx = out.length; // row index of the first query line
+      const queryRows = wrapHard(p.query, Math.max(10, width - 2));
+      for (let i = 0; i < queryRows.length; i++) {
+        out.push((i === 0 ? CYAN + "> " + RESET : "  ") + queryRows[i]);
+      }
 
       const listHeight = pickerListHeight;
       const start =
@@ -246,7 +256,9 @@ export class Screen {
             );
       for (let i = start; i < Math.min(start + listHeight, p.items.length); i++) {
         const item = p.items[i];
-        const active = p.items.length > 0 && i === p.index && p.query === "";
+        // Always show the highlight: the query no longer filters the list, so
+        // suppressing the highlight while typing made the selection invisible.
+        const active = p.items.length > 0 && i === p.index;
         const prefix = active ? REVERSE + "▸ " : "  ";
         const labelWidth = Math.max(10, width - 20);
         const label = `${item.label}`.padEnd(labelWidth).slice(0, labelWidth);
@@ -281,9 +293,15 @@ export class Screen {
 
       stdout.write(CLEAR + out.join("\n"));
 
-      // Place the cursor inside the picker's query line. `queryRowIdx` counts
-      // content lines from 0, matching placeCursor's 0-based row argument.
-      this.placeCursor(width, queryRowIdx, 2 + p.query.length);
+      // Place the cursor at the end of the typed text, accounting for wrapping.
+      // Same end-of-row rule as the chat input: when the text exactly fills a
+      // row the caret stays on that row rather than jumping to the next.
+      const qWidth = Math.max(10, width - 2);
+      const qLen = p.query.length;
+      const qAtEnd = qLen > 0 && qLen % qWidth === 0;
+      const qRow = qAtEnd ? qLen / qWidth - 1 : Math.floor(qLen / qWidth);
+      const qCol = qAtEnd ? qWidth : qLen % qWidth;
+      this.placeCursor(width, queryRowIdx + qRow, 2 + qCol);
       return;
     }
 

@@ -77,8 +77,7 @@ export class App {
   }
 
   private render(): void {
-    const filtered = this.filteredSessions();
-    const items: PickerItem[] = filtered.map((s) => ({
+    const items: PickerItem[] = this.pickerSessions().map((s) => ({
       label: s.title,
       detail:
         `${s.entries.length} msgs · ${s.status === "thinking" ? "● thinking" : "idle"} · ` +
@@ -106,17 +105,22 @@ export class App {
     });
   }
 
-  /** Sessions matching the picker's current query (all when empty). */
-  private filteredSessions(): Session[] {
-    const q = this.picker?.query.value.trim().toLowerCase();
-    if (!q) return this.sessions;
-    return this.sessions.filter((s) => s.title.toLowerCase().includes(q));
+  /**
+   * Sessions shown in the picker -- the whole list, in order.
+   *
+   * Typing no longer reorders or hides entries. Filtering the list against the
+   * query made the highlighted row jump around as you typed, and the query line
+   * is where the caret rendering went wrong; selection is by arrow keys only.
+   * The text box remains, but purely as "start a new session with this message".
+   */
+  private pickerSessions(): Session[] {
+    return this.sessions;
   }
 
-  /** Keep the picker index inside the filtered list. */
+  /** Keep the picker index inside the list. */
   private clampPickerIndex(): void {
     if (!this.picker) return;
-    const n = this.filteredSessions().length;
+    const n = this.pickerSessions().length;
     this.picker.index = n === 0 ? 0 : Math.min(this.picker.index, n - 1);
     if (this.picker.index < 0) this.picker.index = 0;
   }
@@ -129,8 +133,8 @@ export class App {
 
   private onPickerKey(k: Key): void {
     const p = this.picker!;
-    const filtered = this.filteredSessions();
-    const n = filtered.length;
+    const items = this.pickerSessions();
+    const n = items.length;
     const q = p.query;
 
     switch (k.type) {
@@ -183,7 +187,7 @@ export class App {
           this.startNewSessionWith(text);
         } else if (n > 0) {
           // Nothing typed => open the highlighted session.
-          this.openSession(filtered[p.index]);
+          this.openSession(items[p.index]);
         }
         this.picker = null;
         this.requestRender();
@@ -213,7 +217,7 @@ export class App {
           return;
         }
         if (k.ch === "d" && q.value === "" && n > 0) {
-          p.confirmDelete = filtered[p.index].id;
+          p.confirmDelete = items[p.index].id;
         } else {
           q.insert(k.ch);
           this.clampPickerIndex();

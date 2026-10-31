@@ -17,7 +17,7 @@ has a text prompt:
   message as its first turn.
 - **Press Enter with nothing typed** → opens the session highlighted with
   `↑`/`↓`.
-- Typing also filters the list by title.
+- Typing does *not* filter the list — use `↑`/`↓` to move through it.
 
 | Key | Action |
 | --- | --- |
@@ -33,7 +33,7 @@ has a text prompt:
 | `↑` / `↓` | Scroll transcript one line |
 | `PgUp` / `PgDn` | Scroll transcript one page |
 | `Ctrl+R` | Open the session picker |
-| *type* (in picker) | Filter sessions; `Enter` starts a **new** session with that text |
+| *type* (in picker) | `Enter` starts a **new** session with that text (does not filter the list) |
 | `↑` / `↓` (in picker) | Move through sessions |
 | `Enter` with nothing typed | **Open** the highlighted session |
 | `d` (in picker) | Delete highlighted session (asks for confirmation) |
