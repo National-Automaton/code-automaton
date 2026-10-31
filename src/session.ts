@@ -1,4 +1,5 @@
 import { Agent, AgentEvent } from "./agent.js";
+import type { AttachedImage } from "./image.js";
 import { Config } from "./config.js";
 import {
   Entry,
@@ -41,9 +42,18 @@ export class Session {
    * Run a user turn. Emits changes via onUpdate so the UI can redraw.
    * Safe to call only when status === "idle".
    */
-  async run(input: string, onUpdate: () => void): Promise<void> {
+  async run(
+    input: string,
+    onUpdate: () => void,
+    images: AttachedImage[] = []
+  ): Promise<void> {
     this.status = "thinking";
-    this.entries.push({ role: "user", text: input });
+    // Show the attachment in the transcript so it is clear what was sent; the
+    // pixels themselves never go in the entry list.
+    const label = images.length
+      ? input + (input ? " " : "") + images.map((i) => `[image: ${i.path}]`).join(" ")
+      : input;
+    this.entries.push({ role: "user", text: label });
     // Give an untitled session its title from the first user message. Existing
     // titles are left alone so a long-running session keeps its identity.
     if (this.title === "new session") {
@@ -90,7 +100,7 @@ export class Session {
     };
 
     try {
-      await this.agent.send(input, emit);
+      await this.agent.send(input, emit, images);
     } catch (err: any) {
       this.entries.push({
         role: "assistant",

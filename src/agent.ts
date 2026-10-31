@@ -5,6 +5,11 @@ import type {
 } from "openai/resources/chat/completions";
 import { Config } from "./config.js";
 import { runTool, toolDefinitions } from "./tools.js";
+import {
+  AttachedImage,
+  hasImagePart,
+  imageParts,
+} from "./image.js";
 
 const SYSTEM_PROMPT = `You are a coding assistant running in a terminal.
 You can read, write, and edit files, list directories, and run shell commands.
@@ -26,6 +31,8 @@ export class Agent {
   private client: OpenAI;
   messages: ChatCompletionMessageParam[];
 
+  private visionClient: OpenAI;
+
   constructor(
     private config: Config,
     messages?: ChatCompletionMessageParam[]
@@ -34,7 +41,30 @@ export class Agent {
       apiKey: config.apiKey,
       baseURL: config.baseURL,
     });
+    this.visionClient = new OpenAI({
+      apiKey: config.visionApiKey,
+      baseURL: config.visionBaseURL,
+    });
     this.messages = messages ?? [{ role: "system", content: SYSTEM_PROMPT }];
+  }
+
+  /**
+   * True if any message so far carries an image. Routing is per request rather
+   * than per session so one conversation can mix text and screenshots.
+   *
+   * Note this stays true for the rest of the session: once an image is in the
+   * history it is re-sent with every request, so the vision model must keep
+   * handling the conversation or the model would lose that context.
+   */
+  private needsVision(): boolean {
+    return this.messages.some((m) => hasImagePart((m as any).content));
+  }
+
+  /** The client and model to use for the next request. */
+  private route(): { client: OpenAI; model: string } {
+    return this.needsVision()
+      ? { client: this.visionClient, model: this.config.visionModel }
+      : { client: this.client, model: this.config.model };
   }
 
   /**
@@ -43,18 +73,27 @@ export class Agent {
    */
   async send(
     userInput: string,
-    emit: (ev: AgentEvent) => void
+    emit: (ev: AgentEvent) => void,
+    images: AttachedImage[] = []
   ): Promise<void> {
-    this.messages.push({ role: "user", content: userInput });
+    if (images.length) {
+      // Image parts are only accepted in `user` messages; tool results cannot
+      // carry them. Annotate each part with its path so the session store can
+      // swap the pixels for a placeholder and re-read them on reload.
+      const parts: any[] = [{ type: "text", text: userInput }];
+      const imgParts = await imageParts(images);
+      for (let i = 0; i < imgParts.length; i++) {
+        parts.push({ ...imgParts[i], image_path: images[i].path });
+      }
+      this.messages.push({ role: "user", content: parts });
+    } else {
+      this.messages.push({ role: "user", content: userInput });
+    }
 
     // Loop until the model stops requesting tools.
     while (true) {
-      const stream = await this.client.chat.completions.create({
-        model: this.config.model,
-        messages: this.messages,
-        tools: toolDefinitions,
-        stream: true,
-      });
+      const { client, model } = this.route();
+      const stream = await this.createWithRetry(client, model, emit);
 
       let content = "";
       const toolCalls: ChatCompletionMessageToolCall[] = [];
@@ -77,6 +116,14 @@ export class Agent {
               };
             }
             if (tc.id) toolCalls[idx].id = tc.id;
+            // Providers may attach opaque data to a tool call that must be
+            // echoed back on the next request. Gemini returns a
+            // `thought_signature` here and rejects the following turn without
+            // it ("Function call is missing a thought_signature"). Preserve
+            // whatever the provider sent rather than rebuilding the call from
+            // only id/name/arguments.
+            const extra = (tc as any).extra_content;
+            if (extra) (toolCalls[idx] as any).extra_content = extra;
             if (tc.function?.name) toolCalls[idx].function.name += tc.function.name;
             if (tc.function?.arguments)
               toolCalls[idx].function.arguments += tc.function.arguments;
@@ -116,6 +163,43 @@ export class Agent {
           tool_call_id: call.id,
           content: result.output,
         });
+      }
+    }
+  }
+
+  /**
+   * Start a streaming completion, retrying transient upstream failures.
+   *
+   * Vision endpoints (notably Gemini's free tier) routinely return 503 "high
+   * demand" or 429; without a retry an ordinary screenshot question fails and
+   * looks like a bug in coda. Only the initial request is retried -- once the
+   * stream has started, a mid-stream failure is surfaced rather than silently
+   * re-run, which would duplicate partial output.
+   */
+  private async createWithRetry(
+    client: OpenAI,
+    model: string,
+    emit: (ev: AgentEvent) => void
+  ) {
+    const attempts = 3;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await client.chat.completions.create({
+          model,
+          messages: this.messages,
+          tools: toolDefinitions,
+          stream: true,
+        });
+      } catch (err: any) {
+        const status = err?.status ?? err?.response?.status;
+        const transient = status === 503 || status === 429 || status === 500;
+        if (!transient || attempt >= attempts) throw err;
+        const waitMs = 500 * 2 ** (attempt - 1);
+        emit({
+          type: "text",
+          text: `\n[${model} returned ${status}, retrying in ${waitMs / 1000}s (${attempt}/${attempts - 1})]\n`,
+        });
+        await new Promise((r) => setTimeout(r, waitMs));
       }
     }
   }

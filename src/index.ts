@@ -56,6 +56,18 @@ Environment (any OpenAI-compatible endpoint works):
   CODA_MODEL          Model name (default: deepseek-chat)
   CODA_SESSIONS_DIR   Session storage (default: ~/.coda/sessions)
 
+Images:
+  /paste              Attach the image currently on the Windows clipboard
+                      (WSL only). Copy a screenshot, then run /paste.
+  /image <path>       Attach an image file to your next message. Messages
+                      carrying an image are sent to the vision model.
+
+  CODA_VISION_MODEL   Model used for image messages. Falls back to CODA_MODEL,
+                      so a model without vision support will not see images.
+  CODA_VISION_BASE_URL  Endpoint for the vision model. Falls back to
+                      CODA_BASE_URL.
+  CODA_VISION_API_KEY   Key for the vision model. Falls back to CODA_API_KEY.
+
 Note: ANTHROPIC_BASE_URL is intentionally ignored. Anthropic-shaped URLs
 (e.g. https://api.deepseek.com/anthropic) are not OpenAI-compatible.
 

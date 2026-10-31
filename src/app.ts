@@ -4,6 +4,8 @@ import { LineBuffer } from "./linebuffer.js";
 import { Screen, PickerItem } from "./screen.js";
 import { Session } from "./session.js";
 import { loadAll } from "./store.js";
+import { attachImage, clipboardContents, clipboardImagePath, ImageError } from "./image.js";
+import type { AttachedImage } from "./image.js";
 
 /**
  * Owns the whole TUI: the list of live sessions, which one is active, and the
@@ -25,6 +27,8 @@ export class App {
   private screen = new Screen();
   private keys = new KeyReader();
   private quitting = false;
+  /** Images attached with /image, waiting to ride along with the next message. */
+  private pendingImages: AttachedImage[] = [];
   private renderQueued = false;
 
   constructor(private config: Config) {}
@@ -223,6 +227,7 @@ export class App {
         else if (k.ch === "u") { q.deleteToStart(); this.clampPickerIndex(); this.requestRender(); }
         else if (k.ch === "k") { q.deleteToEnd(); this.clampPickerIndex(); this.requestRender(); }
         else if (k.ch === "w") { q.deleteWordLeft(); this.clampPickerIndex(); this.requestRender(); }
+        else if (k.ch === "v") void this.pasteImageFromClipboard();
         return;
     }
   }
@@ -291,6 +296,7 @@ export class App {
         else if (k.ch === "u") { b.deleteToStart(); this.requestRender(); }
         else if (k.ch === "k") { b.deleteToEnd(); this.requestRender(); }
         else if (k.ch === "w") { b.deleteWordLeft(); this.requestRender(); }
+        else if (k.ch === "v") void this.pasteImageFromClipboard();
         return;
       case "alt":
         if (k.ch === "b") { b.wordLeft(); this.requestRender(); }
@@ -347,6 +353,69 @@ export class App {
     }
   }
 
+  /** Attach a screenshot to the next message; errors are shown in the transcript. */
+  private async attachImage(p: string): Promise<void> {
+    if (!p) {
+      this.systemNote("usage: /image <path>   (attach a screenshot to your next message)");
+      return;
+    }
+    try {
+      const img = await attachImage(p);
+      this.pendingImages.push(img);
+      // Small images would otherwise round to "0 KB".
+      const kb = img.bytes < 1024
+        ? `${img.bytes} bytes`
+        : `${Math.round(img.bytes / 1024)} KB`;
+      this.systemNote(`attached ${img.path} (${img.mime}, ${kb}) — send your message when ready`);
+    } catch (err: any) {
+      this.systemNote(err instanceof ImageError ? err.message : `could not attach ${p}: ${err?.message ?? err}`);
+    }
+  }
+
+  /**
+   * Ctrl+V: attach the clipboard image, but only when the clipboard holds an
+   * image and no text.
+   *
+   * A clipboard can hold both at once (a chart copied from Excel, an image with
+   * a URL attached), and hijacking Ctrl+V there would swallow an ordinary text
+   * paste. When text is present this does nothing and the terminal's own paste
+   * binding (Ctrl+Shift+V in Windows Terminal) is left to handle it.
+   */
+  private async pasteImageFromClipboard(): Promise<void> {
+    const contents = await clipboardContents();
+    if (!contents) return; // not WSL / no PowerShell: stay out of the way
+    if (contents.image && !contents.text) {
+      await this.pasteFromClipboard();
+    }
+  }
+
+  /** Attach whatever image is on the Windows clipboard. */
+  private async pasteFromClipboard(): Promise<void> {
+    this.systemNote("reading image from clipboard…");
+    const p = await clipboardImagePath();
+    if (!p) {
+      this.systemNote(
+        "no image on the clipboard (or PowerShell is unavailable). " +
+          "Copy a screenshot, or use /image <path>."
+      );
+      return;
+    }
+    try {
+      const img = await attachImage(p);
+      this.pendingImages.push(img);
+      this.systemNote(`attached clipboard image (${img.mime}, ${(img.bytes / 1024).toFixed(1)} KB) — send your message when ready`);
+    } catch (err: any) {
+      this.systemNote(err instanceof ImageError ? err.message : `could not attach clipboard image: ${err?.message ?? err}`);
+    }
+  }
+
+  /** Append a local, informational line to the current transcript. */
+  private systemNote(text: string): void {
+    this.current().entries.push({ role: "tool", name: "coda", ok: true, text });
+    this.scroll = 0;
+    this.requestRender();
+  }
+
   /** Scroll the transcript by `delta` lines (positive = back in history). */
   private scrollBy(delta: number): void {
     const maxOffset = Math.max(0, this.screen.totalLines - this.screen.viewportRows);
@@ -387,6 +456,24 @@ export class App {
   private submit(): void {
     const text = this.input.value.trim();
     if (!text) return;
+
+    // `/image <path>` attaches a screenshot to the next message instead of
+    // sending it. Images cannot travel through a tool result, so they are
+    // attached to the user message itself.
+    // `/paste` pulls an image straight off the Windows clipboard. Windows
+    // Terminal cannot hand image data to a program through the paste stream,
+    // so the clipboard is read from the Windows side instead.
+    if (text === "/paste" || text === "/paste ") {
+      this.input.clear();
+      void this.pasteFromClipboard();
+      return;
+    }
+    if (text.startsWith("/image")) {
+      const arg = text.slice("/image".length).trim();
+      this.input.clear();
+      void this.attachImage(arg);
+      return;
+    }
     if (text === "exit" || text === "quit") {
       this.quit();
       return;
@@ -396,12 +483,22 @@ export class App {
 
     // If the active session is still the untouched placeholder, this text
     // starts a fresh session rather than living in an empty one.
+    const images = this.pendingImages;
+    this.pendingImages = [];
+
     if (session.entries.length === 0) {
       this.startNewSessionWith(text);
+      // startNewSessionWith creates a new session; hand the attachments to it.
+      if (images.length) {
+        const fresh = this.current();
+        this.input.clear();
+        this.scroll = 0;
+        void fresh.run(text, () => this.requestRender(), images);
+      }
     } else {
       this.input.clear();
       this.scroll = 0; // jump back to the tail so you see the reply
-      void session.run(text, () => this.requestRender());
+      void session.run(text, () => this.requestRender(), images);
     }
     this.requestRender();
   }

@@ -39,6 +39,7 @@ has a text prompt:
 | `d` (in picker) | Delete highlighted session (asks for confirmation) |
 | `y` | Confirm deletion (any other key cancels) |
 | `Esc` (in picker) | Cancel |
+| `Ctrl+V` | Attach the clipboard image (image-only clipboard; see [Images](#images)) |
 | `Ctrl+T` | New session |
 | `Ctrl+X` | Close the current session |
 | `Ctrl+C` | Exit |
@@ -102,6 +103,34 @@ node dist/index.js
 So `npm run dev` reflects your edits immediately and `coda` does not — rebuild
 before testing a change through the global command.
 
+## Images
+
+Attach a screenshot to a message and the model can reason about it:
+
+| Input | What it does |
+| --- | --- |
+| **Ctrl+V** | Attaches the clipboard image, if the clipboard holds an image and no text |
+| `/paste` | Attaches the clipboard image regardless of any accompanying text |
+| `/image <path>` | Attaches an image file (`png`, `jpeg`, `webp`, `gif`; max 5 MB) |
+
+Ctrl+V only fires when the clipboard is image-only, so ordinary text pastes
+still reach the terminal. A clipboard can hold an image *and* text at once —
+copying a chart from a spreadsheet, or a browser image with its source URL —
+and in that case text paste wins. Use `/paste` when you want the image anyway.
+
+Messages carrying an image are routed to a vision model; everything else goes
+to the text model. Both are configured separately (see [Config](#config)), so a
+text-only setup keeps working unchanged.
+
+Attachments are stored in the session as a `[image: path]` placeholder rather
+than the image bytes: a 1 MB screenshot would otherwise put ~1.4 MB of base64
+into every session file. The file is re-read when the session is reloaded, so a
+moved or deleted image degrades to the placeholder.
+
+**Clipboard access is WSL-only**, because Windows Terminal cannot pass image
+data to a program through standard input — the clipboard is read from the
+Windows side via PowerShell. On macOS/Linux use `/image <path>`.
+
 ## Tools
 
 - `read_file` — read a file
@@ -118,6 +147,14 @@ before testing a change through the global command.
 | `CODA_BASE_URL` | `https://api.deepseek.com` (also reads `DEEPSEEK_BASE_URL` / `OPENAI_BASE_URL`) |
 | `CODA_MODEL` | `deepseek-chat` (also reads `DEEPSEEK_MODEL` / `OPENAI_MODEL`) |
 | `CODA_SESSIONS_DIR` | `~/.coda/sessions` (also reads the older `DSC_SESSIONS_DIR`) |
+| `CODA_VISION_MODEL` | the value of `CODA_MODEL` |
+| `CODA_VISION_BASE_URL` | the value of `CODA_BASE_URL` |
+| `CODA_VISION_API_KEY` | the value of `CODA_API_KEY` |
+
+The `CODA_VISION_*` variables select the model used for messages containing an
+image. They fall back to their text counterparts, but a model without vision
+support will silently ignore the image rather than error — so set them
+explicitly if you attach screenshots.
 
 If no API key is found, `coda` exits with an error explaining the variable
 names it looked for.

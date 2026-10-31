@@ -12,6 +12,13 @@ export interface Config {
   apiKey: string;
   baseURL: string;
   model: string;
+  /**
+   * Model/endpoint used when a request contains an image. Each falls back to
+   * its text counterpart, so text-only setups need no extra configuration.
+   */
+  visionModel: string;
+  visionBaseURL: string;
+  visionApiKey: string;
 }
 
 /**
@@ -92,11 +99,21 @@ export function loadConfig(): Config {
   // ANTHROPIC_BASE_URL is intentionally absent from this chain: values such as
   // https://api.deepseek.com/anthropic are Anthropic-shaped, not
   // OpenAI-compatible, so the client in agent.ts would fail against them.
+  const baseURL =
+    env("CODA_BASE_URL", "DEEPSEEK_BASE_URL", "OPENAI_BASE_URL") ??
+    "https://api.deepseek.com";
+  const model = env("CODA_MODEL", "DEEPSEEK_MODEL", "OPENAI_MODEL") ?? "deepseek-chat";
+
+  // Vision is optional: unset means "use the text endpoint", which keeps the
+  // existing behaviour for anyone who never attaches an image. Sending an image
+  // to a model without vision silently returns nonsense, so this is checked in
+  // agent.ts rather than assumed.
   return {
     apiKey,
-    baseURL:
-      env("CODA_BASE_URL", "DEEPSEEK_BASE_URL", "OPENAI_BASE_URL") ??
-      "https://api.deepseek.com",
-    model: env("CODA_MODEL", "DEEPSEEK_MODEL", "OPENAI_MODEL") ?? "deepseek-chat",
+    baseURL,
+    model,
+    visionModel: env("CODA_VISION_MODEL") ?? model,
+    visionBaseURL: env("CODA_VISION_BASE_URL") ?? baseURL,
+    visionApiKey: env("CODA_VISION_API_KEY") ?? apiKey,
   };
 }

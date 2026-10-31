@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import { stripImagesForStorage, restoreImagesForLoad } from "./image.js";
 
 /**
  * Where sessions live on disk. `CODA_SESSIONS_DIR` (or the older
@@ -81,7 +82,18 @@ export async function loadAll(): Promise<SessionRecord[]> {
     try {
       const raw = await fs.readFile(path.join(SESSIONS_DIR, name), "utf8");
       const parsed = JSON.parse(raw);
-      if (isRecord(parsed)) records.push(parsed);
+      if (isRecord(parsed)) {
+        // Re-read any screenshots referenced by placeholder text so a reloaded
+        // session still lets the model see what it was asked about.
+        parsed.messages = await Promise.all(
+          parsed.messages.map(async (m: any) =>
+            Array.isArray(m?.content)
+              ? { ...m, content: await restoreImagesForLoad(m.content) }
+              : m
+          )
+        );
+        records.push(parsed);
+      }
     } catch {
       // ignore corrupt / partially written session files
     }
@@ -90,12 +102,26 @@ export async function loadAll(): Promise<SessionRecord[]> {
   return records;
 }
 
-/** Atomically write a session to disk. */
+/**
+ * Atomically write a session to disk.
+ *
+ * Image parts are replaced with a `[image: path]` placeholder first. Keeping
+ * the base64 would put ~1.4 MB of text in the file for every 1 MB screenshot,
+ * and the bytes are re-read from disk when the session is loaded.
+ */
 export async function save(rec: SessionRecord): Promise<void> {
   await ensureDir();
   const file = path.join(SESSIONS_DIR, `${rec.id}.json`);
   const tmp = file + ".tmp";
-  await fs.writeFile(tmp, JSON.stringify(rec, null, 2), { encoding: "utf8", mode: 0o600 });
+  const stored = {
+    ...rec,
+    messages: rec.messages.map((m) => {
+      const content = (m as any).content;
+      if (!Array.isArray(content)) return m;
+      return { ...m, content: stripImagesForStorage(content) } as typeof m;
+    }),
+  };
+  await fs.writeFile(tmp, JSON.stringify(stored, null, 2), { encoding: "utf8", mode: 0o600 });
   await fs.rename(tmp, file);
 }
 
