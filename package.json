@@ -1,0 +1,52 @@
+{
+  "name": "code-automaton",
+  "version": "1.0.0",
+  "description": "Code Automaton — a terminal agentic coding tool with session recall.",
+  "license": "MIT",
+  "author": "Michael Davis <info@nationalautomaton.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/National-Automaton/code-automaton.git"
+  },
+  "homepage": "https://github.com/National-Automaton/code-automaton#readme",
+  "bugs": {
+    "url": "https://github.com/National-Automaton/code-automaton/issues"
+  },
+  "private": false,
+  "type": "module",
+  "bin": {
+    "coda": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "coding-agent",
+    "terminal",
+    "tui",
+    "llm",
+    "cli",
+    "openai-compatible"
+  ],
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "openai": "^4.67.3",
+    "punycode": "^2.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3"
+  }
+}
