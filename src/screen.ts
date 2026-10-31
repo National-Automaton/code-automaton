@@ -234,17 +234,8 @@ export class Screen {
       out.push("");
       out.push(DIM + "─".repeat(width) + RESET);
 
-      // Picker prompt: the typed text becomes the first message of a new
-      // session if you press Enter with something typed. It no longer filters
-      // the list. Wrapped hard so a long message cannot overrun the width and
-      // push the rest of the frame down when the terminal soft-wraps it.
       const p = s.picker;
-      out.push(BOLD + "New session" + RESET + DIM + " (type a message, or pick a session below)" + RESET);
-      const queryRowIdx = out.length; // row index of the first query line
-      const queryRows = wrapHard(p.query, Math.max(10, width - 2));
-      for (let i = 0; i < queryRows.length; i++) {
-        out.push((i === 0 ? CYAN + "> " + RESET : "  ") + queryRows[i]);
-      }
+      out.push(BOLD + "Sessions" + RESET + DIM + " (↑/↓ to move, Enter to open)" + RESET);
 
       const listHeight = pickerListHeight;
       const start =
@@ -266,9 +257,19 @@ export class Screen {
         out.push(active ? REVERSE + line.padEnd(width) + RESET : line);
       }
       if (p.items.length === 0 && listHeight > 0) {
-        out.push(DIM + "  (no sessions match)" + RESET);
+        out.push(DIM + "  (no sessions)" + RESET);
       }
       out.push(DIM + "─".repeat(width) + RESET);
+
+      // Entry field sits below the list, directly above the hint/status line.
+      // Typed text becomes the first message of a new session on Enter; it does
+      // not filter the list. Wrapped hard so a long message cannot overrun the
+      // width and push the rest of the frame down when the terminal soft-wraps.
+      const queryRowIdx = out.length;
+      const queryRows = wrapHard(p.query, Math.max(10, width - 2));
+      for (let i = 0; i < queryRows.length; i++) {
+        out.push((i === 0 ? CYAN + "> " + RESET : "  ") + queryRows[i]);
+      }
       if (p.confirmDelete !== null) {
         const label =
           p.confirmDelete.length > 40 ? p.confirmDelete.slice(0, 37) + "..." : p.confirmDelete;

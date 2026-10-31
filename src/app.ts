@@ -433,8 +433,14 @@ export class App {
   }
 
   private openPicker(): void {
+    // Select the current session by identity, not array position. `sessions`
+    // mixes two orders -- loaded records are newest-first, while new sessions
+    // are appended -- so indexOf() pointed at the wrong row and the highlight
+    // landed on the last item instead of the session you were in.
+    const cur = this.current();
+    const idx = this.sessions.findIndex((s) => s.id === cur.id);
     this.picker = {
-      index: Math.max(0, this.sessions.indexOf(this.current())),
+      index: Math.max(0, idx),
       query: new LineBuffer(),
       confirmDelete: null,
     };
