@@ -122,13 +122,18 @@ export class Screen {
   }
 
   /**
-   * Rows the chat input occupies once wrapped. The input is drawn `width - 2`
-   * wide (a 2-column prompt gutter). An exact multiple of the width still fits
-   * in that many rows, since the caret rests at the end of the filled row
-   * rather than starting a new one.
+   * Rows the chat input occupies once wrapped. The input is drawn `width - 3`
+   * wide (a 2-column prompt gutter, leaving the final column free). An exact
+   * multiple of the width still fits in that many rows, since the caret rests
+   * at the end of the filled row rather than starting a new one.
+   *
+   * Width is `width - 3`, not `width - 2`: a full edit row is then at most
+   * `width - 1` visible columns, so the terminal never auto-wraps it behind our
+   * back. Auto-wrapping would add phantom rows the renderer doesn't count,
+   * which pushed the caret onto the line below the text it belongs to.
    */
   private inputRows(input: string, width: number): number {
-    const inputWidth = Math.max(10, width - 2);
+    const inputWidth = Math.max(10, width - 3);
     if (input.length === 0) return 1;
     return Math.max(1, Math.ceil(input.length / inputWidth));
   }
@@ -196,7 +201,7 @@ export class Screen {
     // message does not push the list off the bottom.
     const pickerFieldLen = s.picker ? (s.picker.rename?.value.length ?? s.picker.query.length) : 0;
     const pickerQueryExtra = s.picker
-      ? Math.max(0, Math.ceil(pickerFieldLen / Math.max(10, width - 2)) - 1)
+      ? Math.max(0, Math.ceil(pickerFieldLen / Math.max(10, width - 3)) - 1)
       : 0;
     const pickerFixedChrome = 1 + 1 + 6 + pickerQueryExtra; // header + transcript-blank + chrome
     const pickerSpace = s.picker ? Math.max(0, height - pickerFixedChrome - 2) : 0;
@@ -244,7 +249,7 @@ export class Screen {
 
     if (s.picker) {
       out.push("");
-      out.push(DIM + "─".repeat(width) + RESET);
+      out.push(DIM + "─".repeat(Math.max(1, width - 1)) + RESET);
 
       const p = s.picker;
       out.push(
@@ -278,7 +283,7 @@ export class Screen {
       if (p.items.length === 0 && listHeight > 0) {
         out.push(DIM + "  (no sessions)" + RESET);
       }
-      out.push(DIM + "─".repeat(width) + RESET);
+      out.push(DIM + "─".repeat(Math.max(1, width - 1)) + RESET);
 
       // Entry field sits below the list, directly above the hint/status line.
       // Typed text becomes the first message of a new session on Enter; it does
@@ -287,7 +292,7 @@ export class Screen {
       // While renaming, the same field edits the session title instead.
       const fieldValue = p.rename ? p.rename.value : p.query;
       const queryRowIdx = out.length;
-      const queryRows = wrapHard(fieldValue, Math.max(10, width - 2));
+      const queryRows = wrapHard(fieldValue, Math.max(10, width - 3));
       for (let i = 0; i < queryRows.length; i++) {
         out.push((i === 0 ? CYAN + "> " + RESET : "  ") + queryRows[i]);
       }
@@ -324,7 +329,7 @@ export class Screen {
       // Place the cursor at the end of the typed text, accounting for wrapping.
       // Same end-of-row rule as the chat input: when the text exactly fills a
       // row the caret stays on that row rather than jumping to the next.
-      const qWidth = Math.max(10, width - 2);
+      const qWidth = Math.max(10, width - 3);
       const qLen = p.rename
         ? Math.max(0, Math.min(p.rename.cursor, p.rename.value.length))
         : p.query.length;
@@ -337,7 +342,7 @@ export class Screen {
 
     // ---- Chat input: wrapped, with a real cursor at the edit position ----
     out.push("");
-    const inputWidth = Math.max(10, width - 2);
+    const inputWidth = Math.max(10, width - 3);
     const wrapped = wrapHard(s.input, inputWidth);
     // Which visual row/col does the cursor land on? When the text exactly fills
     // a row the caret belongs at the end of that filled row, not at column 1 of
