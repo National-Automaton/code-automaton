@@ -39,6 +39,15 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      # actions/setup-node bundles whatever npm came with the Node release,
+      # and Node 22 ships npm 10 -- which has no `npm stage` subcommand. Install
+      # a current npm explicitly rather than depending on the bundled one.
+      - name: Update npm
+        run: npm install -g npm@11
+
+      - name: Show versions
+        run: node --version && npm --version
+
       # `npm ci` runs the `prepare` script, which builds dist/. The published
       # package ships dist/ rather than src/, so a stale build would stage code
       # that does not match the tag.
