@@ -24,6 +24,7 @@ export type AgentEvent =
   | { type: "text"; text: string }
   | { type: "tool_start"; name: string; args: any }
   | { type: "tool_result"; name: string; ok: boolean; output: string }
+  | { type: "steer"; text: string }
   | { type: "done" }
   | { type: "error"; message: string };
 
@@ -56,6 +57,29 @@ export class Agent {
    * history it is re-sent with every request, so the vision model must keep
    * handling the conversation or the model would lose that context.
    */
+  /**
+   * Text the user typed while a turn was running, waiting to be folded into
+   * the next request. The whole history is re-sent on every loop iteration, so
+   * anything appended here reaches the model at the next checkpoint -- between
+   * tool calls -- rather than waiting for the turn to finish.
+   */
+  private pendingSteers: string[] = [];
+
+  /** Queue a mid-turn message for the running turn. */
+  steer(text: string): void {
+    const t = text.trim();
+    if (t) this.pendingSteers.push(t);
+  }
+
+  /** Append queued steers to the history, returning the texts folded in. */
+  private flushSteers(): string[] {
+    if (!this.pendingSteers.length) return [];
+    const queued = this.pendingSteers;
+    this.pendingSteers = [];
+    for (const text of queued) this.messages.push({ role: "user", content: text });
+    return queued;
+  }
+
   private needsVision(): boolean {
     return this.messages.some((m) => hasImagePart((m as any).content));
   }
@@ -92,6 +116,11 @@ export class Agent {
 
     // Loop until the model stops requesting tools.
     while (true) {
+      // Fold in anything typed while the previous request was in flight, so a
+      // mid-turn steer lands alongside the tool results rather than after the
+      // turn ends.
+      for (const text of this.flushSteers()) emit({ type: "steer", text });
+
       const { client, model } = this.route();
       const stream = await this.createWithRetry(client, model, emit);
 

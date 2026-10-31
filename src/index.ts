@@ -34,7 +34,9 @@ Options:
   -v, --version   Print the version and exit.
 
 Keys:
-  Enter           Send the current line
+  Enter           Send the current line. While a turn is running, Enter folds
+                  the text into it instead (the model sees it at its next
+                  step, e.g. between tool calls).
   ←               Empty input: open session picker · else: move cursor
   →← / Home / End Move the cursor (Ctrl+A / Ctrl+E for line start / end)
   Ctrl+W / Alt+D  Delete previous / next word

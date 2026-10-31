@@ -42,6 +42,15 @@ export class Session {
    * Run a user turn. Emits changes via onUpdate so the UI can redraw.
    * Safe to call only when status === "idle".
    */
+  /**
+   * Fold text typed during a running turn into that turn. Lands at the next
+   * point the agent re-sends history -- between tool calls -- so it shapes the
+   * work in progress instead of waiting for the turn to end.
+   */
+  steer(text: string): void {
+    this.agent.steer(text);
+  }
+
   async run(
     input: string,
     onUpdate: () => void,
@@ -80,6 +89,14 @@ export class Session {
             name: ev.name,
             text: JSON.stringify(ev.args),
           });
+          break;
+        }
+        case "steer": {
+          // Folded into the running turn: show it in the transcript so it is
+          // clear the model was steered mid-flight, and start a fresh
+          // assistant bubble for whatever it says next.
+          assistantBuf = null;
+          this.entries.push({ role: "user", text: `(mid-turn) ${ev.text}` });
           break;
         }
         case "tool_result": {

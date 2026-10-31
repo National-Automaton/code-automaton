@@ -21,7 +21,7 @@ has a text prompt:
 
 | Key | Action |
 | --- | --- |
-| `Enter` | Send the current line |
+| `Enter` | Send the current line — or, mid-turn, fold it into the running turn |
 | `←` | Empty input: open picker · non-empty: move cursor left |
 | `→` / `Home` / `End` | Move the cursor |
 | `Ctrl+A` / `Ctrl+E` | Jump to start / end of line |
@@ -102,6 +102,20 @@ node dist/index.js
 
 So `npm run dev` reflects your edits immediately and `coda` does not — rebuild
 before testing a change through the global command.
+
+## Steering a running turn
+
+While a turn is running — which, with tool calls, can be a while — pressing
+**Enter** does not queue your text for later. It folds it into the turn: the
+message is appended to the conversation, and because the full history is
+re-sent on every step of the agent loop, the model sees it at its next step,
+typically between tool calls. It appears in the transcript as `(mid-turn) …`.
+
+That means you can interrupt a long `bash` command or redirect a multi-step
+task without waiting for it to finish. It is best-effort rather than an abort:
+if the model was already composing its final answer, the steer arrives after
+it. To stop a turn outright, close the session (`Ctrl+X`) or start a new one
+(`Ctrl+T`).
 
 ## Images
 

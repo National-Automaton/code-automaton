@@ -479,7 +479,16 @@ export class App {
       return;
     }
     const session = this.current();
-    if (session.status === "thinking") return; // busy: ignore
+    if (session.status === "thinking") {
+      // A turn is running: hand the text to it rather than dropping it. It
+      // rides along with the next request the agent sends, which for a turn
+      // running tools is only moments away.
+      session.steer(text);
+      this.input.clear();
+      this.scroll = 0;
+      this.requestRender();
+      return;
+    }
 
     // If the active session is still the untouched placeholder, this text
     // starts a fresh session rather than living in an empty one.
