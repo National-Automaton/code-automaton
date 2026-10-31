@@ -38,7 +38,8 @@
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "prepare": "npm run build"
+    "setup-hooks": "git config core.hooksPath .githooks || true",
+    "prepare": "npm run build && npm run setup-hooks"
   },
   "dependencies": {
     "openai": "^4.67.3",
