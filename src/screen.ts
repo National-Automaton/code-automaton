@@ -96,6 +96,8 @@ export class Screen {
   private rows = stdout.rows || 24;
   /** Total transcript lines from the last render, for scroll clamping. */
   private lastTotalLines = 0;
+  /** Rows actually visible for the transcript in the last render. */
+  private lastViewportRows = 0;
   private resizeHandler = () => {
     this.cols = stdout.columns || 80;
     this.rows = stdout.rows || 24;
@@ -114,10 +116,35 @@ export class Screen {
     return this.lastTotalLines;
   }
 
+  /**
+   * Rows the chat input occupies once wrapped. The input is drawn `width - 2`
+   * wide (a 2-column prompt gutter). An exact multiple of the width still fits
+   * in that many rows, since the caret rests at the end of the filled row
+   * rather than starting a new one.
+   */
+  private inputRows(input: string, width: number): number {
+    const inputWidth = Math.max(10, width - 2);
+    if (input.length === 0) return 1;
+    return Math.max(1, Math.ceil(input.length / inputWidth));
+  }
+
   /** Rows available for the transcript (excludes header/input/status chrome). */
   get viewportRows(): number {
+    // Rows actually used by the last frame, so scroll clamping matches what is
+    // on screen when a wrapped input (or the picker) shrinks the transcript.
+    if (this.lastViewportRows > 0) return this.lastViewportRows;
     // header(1) + blank(1) + blank(1) + input(1) + status(1)
     return Math.max(3, this.rows - 5);
+  }
+
+  /**
+   * Transcript rows for this frame. Shrinks as the input wraps so the frame
+   * never exceeds the terminal height: header(1) + blank(1) + transcript +
+   * blank(1) + input(N) + status(1).
+   */
+  private viewportRowsFor(input: string, width: number): number {
+    const chrome = 4 + this.inputRows(input, width);
+    return Math.max(1, this.rows - chrome);
   }
 
   start(): void {
@@ -155,10 +182,24 @@ export class Screen {
   render(s: RenderState): void {
     const width = this.cols;
     const height = this.rows;
-    const viewport = this.viewportRows;
+    // The picker overlays its own chrome (separator, title, query, list and
+    // hint), so it gets a much smaller transcript budget than the chat view;
+    // otherwise the frame overflows and the query line scrolls off-screen.
+    // On a very short terminal the chrome alone can exceed the height, so the
+    // list shrinks first (down to 0) to keep header + query + hint on screen.
+    const pickerFixedChrome = 1 + 1 + 6; // header + transcript-blank + picker chrome
+    const pickerSpace = s.picker ? Math.max(0, height - pickerFixedChrome - 2) : 0;
+    const pickerListHeight = s.picker
+      ? Math.max(0, Math.min(s.picker.items.length || 1, Math.floor(height / 3), pickerSpace))
+      : 0;
+    const pickerChrome = s.picker ? 6 + pickerListHeight : 0;
+    const viewport = s.picker
+      ? Math.max(0, height - 2 - pickerChrome)
+      : this.viewportRowsFor(s.input, width);
 
     const all = this.styledEntries(s.entries, width);
     this.lastTotalLines = all.length;
+    this.lastViewportRows = viewport;
 
     // Scroll: 0 follows the tail; otherwise look `scrollOffset` lines back.
     const maxOffset = Math.max(0, all.length - viewport);
@@ -177,7 +218,9 @@ export class Screen {
       (offset > 0 ? ` · ${YELLOW}▲ scrolled back ${offset}${RESET}` : "") +
       RESET;
 
-    const out: string[] = [CLEAR];
+    // Content lines only -- CLEAR is written separately before them, so it
+    // cannot shift the frame down by one row.
+    const out: string[] = [];
     out.push(header);
     out.push("");
     for (const line of visible) out.push(line.slice(0, width * 4));
@@ -193,7 +236,7 @@ export class Screen {
       const queryRowIdx = out.length; // row index of the query line
       out.push(CYAN + "> " + RESET + p.query);
 
-      const listHeight = Math.max(1, Math.min(p.items.length, Math.floor(height / 3)));
+      const listHeight = pickerListHeight;
       const start =
         p.items.length === 0
           ? 0
@@ -210,7 +253,7 @@ export class Screen {
         const line = prefix + label + " " + DIM + item.detail + RESET;
         out.push(active ? REVERSE + line.padEnd(width) + RESET : line);
       }
-      if (p.items.length === 0) {
+      if (p.items.length === 0 && listHeight > 0) {
         out.push(DIM + "  (no sessions match)" + RESET);
       }
       out.push(DIM + "─".repeat(width) + RESET);
@@ -236,9 +279,10 @@ export class Screen {
         );
       }
 
-      stdout.write(out.join("\n"));
+      stdout.write(CLEAR + out.join("\n"));
 
-      // Place the cursor inside the picker's query line.
+      // Place the cursor inside the picker's query line. `queryRowIdx` counts
+      // content lines from 0, matching placeCursor's 0-based row argument.
       this.placeCursor(width, queryRowIdx, 2 + p.query.length);
       return;
     }
@@ -247,13 +291,22 @@ export class Screen {
     out.push("");
     const inputWidth = Math.max(10, width - 2);
     const wrapped = wrapHard(s.input, inputWidth);
-    // Which visual row/coll does the cursor land on?
+    // Which visual row/col does the cursor land on? When the text exactly fills
+    // a row the caret belongs at the end of that filled row, not at column 1 of
+    // the next one (which would make it jump a line ahead of the text).
     const clampedCursor = Math.max(0, Math.min(s.cursor, s.input.length));
     const before = s.input.slice(0, clampedCursor);
-    const curRow = Math.floor(before.length / inputWidth);
-    const curCol = before.length % inputWidth;
+    const atRowEnd = before.length > 0 && before.length % inputWidth === 0;
+    const curRow = atRowEnd ? before.length / inputWidth - 1 : Math.floor(before.length / inputWidth);
+    const curCol = atRowEnd ? inputWidth : before.length % inputWidth;
 
-    for (let i = 0; i < wrapped.length; i++) {
+    // Cap the input to the rows actually available, scrolling so the caret row
+    // stays visible. Without this a very long input pushes the frame past the
+    // terminal height and the status line scrolls away.
+    const maxInputRows = Math.max(1, height - 5); // header+blank+blank+status + >=1 transcript
+    const firstVisibleRow = Math.max(0, Math.min(curRow - (maxInputRows - 1), wrapped.length - maxInputRows));
+    for (let i = firstVisibleRow; i < Math.min(wrapped.length, firstVisibleRow + maxInputRows); i++) {
+      // Only the very first visual row carries the prompt gutter.
       const prefix = i === 0 ? CYAN + "> " + RESET : "  ";
       out.push(prefix + wrapped[i]);
     }
@@ -269,11 +322,13 @@ export class Screen {
         scrollHint
     );
 
-    stdout.write(out.join("\n"));
+    stdout.write(CLEAR + out.join("\n"));
 
-    // The input starts after header+blank+viewport+blank = viewport + 3 rows.
+    // Content starts at row 0 (CLEAR is no longer part of the joined frame):
+    // header(0), blank(1), transcript(2..viewport+1), blank(viewport+2),
+    // then the input from viewport+3.
     const inputFirstRow = viewport + 3;
-    this.placeCursor(width, inputFirstRow + curRow, 2 + curCol);
+    this.placeCursor(width, inputFirstRow + (curRow - firstVisibleRow), 2 + curCol);
   }
 
   /**
