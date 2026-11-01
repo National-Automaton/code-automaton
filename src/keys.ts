@@ -23,7 +23,9 @@ export type Key =
   | { type: "ctrl"; ch: string } // e.g. "c" for Ctrl+C
   | { type: "alt"; ch: string } // e.g. Alt+b / Alt+f (ESC <char>)
   | { type: "tab" }
-  | { type: "paste"; text: string };
+  | { type: "paste"; text: string }
+  /** Mouse wheel, when mouse reporting is on. Positive = up (back in history). */
+  | { type: "wheel"; direction: 1 | -1 };
 
 /** Map of control byte -> letter, for Ctrl+<letter>. */
 function ctrlLetter(byte: number): string | null {
@@ -78,14 +80,30 @@ export class KeyReader {
         return true;
       }
       if (b[1] === "[" || b[1] === "O") {
-        // CSI: ESC [ params final
+        // CSI: ESC [ params final. The parameter set includes `<` because SGR
+        // mouse reports arrive as ESC[<b;x;yM (e.g. ESC[<64;10;5M). Leaving it
+        // out made the scan stop after `ESC[`, fall through to the alt-key
+        // branch, and emit the rest of the sequence -- "<64;10;5M" -- as
+        // literal characters typed into the input line.
         let i = 2;
-        while (i < b.length && /[0-9;]/.test(b[i])) i++;
+        while (i < b.length && /[0-9;<]/.test(b[i])) i++;
         if (i >= b.length) return false; // incomplete
         const final = b[i];
         const rest = b.slice(0, i + 1);
         this.buf = b.slice(i + 1);
         const params = b.slice(2, i);
+        // SGR mouse report: "<btn;col;row" followed by M (press) or m (release).
+        if (params.startsWith("<")) {
+          const [btnField] = params.slice(1).split(";");
+          const btn = Number(btnField);
+          if (Number.isFinite(btn)) {
+            // Bit 6 (64) marks a wheel; 65 is down. Buttons 66/67 are
+            // horizontal scroll, which the transcript does not use.
+            if (btn === 64) this.emit({ type: "wheel", direction: 1 });
+            else if (btn === 65) this.emit({ type: "wheel", direction: -1 });
+          }
+          return true;
+        }
         if (params === "200") {
           // Bracketed paste start: swallow until the end marker.
           const end = this.buf.indexOf("\x1b[201~");
