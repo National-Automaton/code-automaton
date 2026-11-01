@@ -1,0 +1,26 @@
+version: 2
+
+# Keep the release workflow's actions current.
+#
+# GitHub retires the Node runtime bundled into an action, so an action pinned
+# two majors back starts emitting deprecation warnings and eventually fails
+# outright. That is how `actions/checkout@v4` and `actions/setup-node@v4` ended
+# up flagged: they still run on node20 while the runner forces node24.
+#
+# Only the github-actions ecosystem is watched. The runtime dependencies
+# (openai, punycode) are a deliberate choice and should be bumped by hand with
+# a build and a test, not by an automated PR.
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+    groups:
+      # One PR for all action bumps rather than one per action: they are
+      # reviewed together and usually share the same runtime migration.
+      actions:
+        patterns:
+          - "*"
