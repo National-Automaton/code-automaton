@@ -52,6 +52,9 @@ Keys:
   Ctrl+X          Close current session
   Ctrl+C          Exit
 
+Commands (typed into the input, sent with Enter):
+  /quit, /exit        Exit and save sessions (same as quit / exit, or Ctrl+C)
+
 Environment (any OpenAI-compatible endpoint works):
   CODA_API_KEY        (required) API key. Also reads DEEPSEEK_API_KEY /
                       OPENAI_API_KEY / ANTHROPIC_API_KEY, in that order.

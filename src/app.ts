@@ -601,6 +601,13 @@ export class App {
       this.quit();
       return;
     }
+    // `/quit` and `/exit` are the slash-command spelling of the bare words
+    // above. Matched exactly (no trailing space handled, since there is no
+    // argument) so a message beginning `/quit…` still reaches the model.
+    if (text === "/quit" || text === "/exit") {
+      this.quit();
+      return;
+    }
     const session = this.current();
     if (session.status === "thinking") {
       // A turn is running: hand the text to it rather than dropping it. It

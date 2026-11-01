@@ -48,6 +48,7 @@ new session. The picker has a text prompt:
 | `Ctrl+T` | New session |
 | `Ctrl+X` | Close the current session |
 | `Ctrl+C` | Exit |
+| `/quit` · `/exit` | Exit (same as typing `quit` / `exit`; sessions are saved) |
 
 Sessions are saved as JSON in `~/.coda/sessions/` (mode `600`) and reloaded the
 next time you start `coda`.
@@ -200,6 +201,18 @@ Windows side via PowerShell. On macOS/Linux use `/image <path>`.
 - `edit_file` — replace the first occurrence of a string
 - `list_dir` — list a directory
 - `bash` — run a shell command
+
+## Commands
+
+Slash commands are typed into the input and sent with Enter. They are matched
+exactly, so a message that merely *starts* with `/quit…` still reaches the
+model.
+
+| Command | What it does |
+| --- | --- |
+| `/quit`, `/exit` | Exit `coda` and save sessions. Same as typing `quit` / `exit`, or `Ctrl+C` |
+| `/paste` | Attach the clipboard image (see [Images](#images)) |
+| `/image <path>` | Attach an image file (see [Images](#images)) |
 
 ## Config
 
