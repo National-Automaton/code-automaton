@@ -7,6 +7,30 @@ import { Entry } from "./store.js";
 
 const ESC = "\x1b[";
 const CLEAR = ESC + "2J" + ESC + "H";
+/**
+ * Home the cursor plus erase-to-end-of-line. Used instead of CLEAR for every
+ * frame after the first: a full `ESC[2J` erase on each render (and there is one
+ * per streamed token) leaves the terminal with no history to scroll, so the
+ * mouse wheel and Shift+PgUp had nothing to show. Repainting in place with
+ * ERASE_LINE keeps the frame from leaving stale tails behind without wiping the
+ * scrollback the terminal has already accumulated.
+ */
+const HOME = ESC + "H";
+const ERASE_LINE = ESC + "K";
+/**
+ * Mouse reporting, SGR encoding (1006) on top of button events (1000).
+ *
+ * The wheel only reports to us when the terminal is told to send it: otherwise
+ * the terminal scrolls its own buffer, which for a repainting full-screen app
+ * holds little. Turning it on means the wheel arrives as ESC[<64;...M and the
+ * app scrolls its own transcript instead. 1000 (not 1003) is deliberate -- we
+ * want wheel/drag only, not a stream of motion reports on every mouse move.
+ *
+ * The cost: while enabled the terminal no longer does its own wheel scrollback
+ * or drag-select; most emulators restore select-to-copy with Shift held.
+ */
+const MOUSE_ON = ESC + "?1000h" + ESC + "?1006h";
+const MOUSE_OFF = ESC + "?1006l" + ESC + "?1000l";
 const HIDE_CURSOR = ESC + "?25l";
 const SHOW_CURSOR = ESC + "?25h";
 const RESET = ESC + "0m";
@@ -138,13 +162,30 @@ export class Screen {
     return Math.max(1, Math.ceil(input.length / inputWidth));
   }
 
-  /** Rows available for the transcript (excludes header/input/status chrome). */
+  /**
+   * Rows available for the transcript (excludes header/input/status chrome).
+   *
+   * Prefers the row count the last frame actually used, so it matches what is
+   * on screen when a wrapped input (or the picker) shrinks the transcript.
+   * Callers clamping a scroll offset should prefer `viewportRowsForInput()`:
+   * this value describes the frame already drawn, not the one about to be.
+   */
   get viewportRows(): number {
-    // Rows actually used by the last frame, so scroll clamping matches what is
-    // on screen when a wrapped input (or the picker) shrinks the transcript.
     if (this.lastViewportRows > 0) return this.lastViewportRows;
     // header(1) + blank(1) + blank(1) + input(1) + status(1)
     return Math.max(3, this.rows - 5);
+  }
+
+  /**
+   * Rows the transcript will occupy in the next frame for `input`.
+   *
+   * Scroll clamping uses this because it runs *before* the render that consumes
+   * the offset: the old code read the previous frame's value, so the first `↑`
+   * of a turn clamped against a stale budget -- and the very first one clamped
+   * against the fallback -- leaving the transcript unable to scroll back.
+   */
+  viewportRowsForInput(input: string): number {
+    return this.viewportRowsFor(input, this.cols);
   }
 
   /**
@@ -159,12 +200,25 @@ export class Screen {
 
   start(): void {
     stdout.on("resize", this.resizeHandler);
-    stdout.write(CLEAR + HIDE_CURSOR);
+    stdout.write(CLEAR + HIDE_CURSOR + MOUSE_ON);
   }
 
   stop(): void {
     stdout.off("resize", this.resizeHandler);
-    stdout.write(SHOW_CURSOR + RESET + "\n");
+    // Mouse reporting must be turned off or the terminal keeps sending mouse
+    // codes to whatever runs next (your shell). Leave the last frame on screen
+    // and start a fresh line below it, so the final transcript stays readable
+    // (and in the terminal's scrollback) after exit.
+    stdout.write(MOUSE_OFF + RESET + SHOW_CURSOR + "\n");
+  }
+
+  /**
+   * Paint a full frame in place. Homed first, then one ERASE_LINE-prefixed
+   * string per row: without the erase, a line shorter than what it replaces
+   * (a shrinking status, a deleted character) leaves the old tail visible.
+   */
+  private draw(lines: string[]): void {
+    stdout.write(HOME + lines.map((l) => l + ERASE_LINE).join("\r\n"));
   }
 
   /** Build the display lines for the transcript, styling roles. */
@@ -324,7 +378,7 @@ export class Screen {
         );
       }
 
-      stdout.write(CLEAR + out.join("\n"));
+      this.draw(out);
 
       // Place the cursor at the end of the typed text, accounting for wrapping.
       // Same end-of-row rule as the chat input: when the text exactly fills a
@@ -375,7 +429,7 @@ export class Screen {
         scrollHint
     );
 
-    stdout.write(CLEAR + out.join("\n"));
+    this.draw(out);
 
     // Content starts at row 0 (CLEAR is no longer part of the joined frame):
     // header(0), blank(1), transcript(2..viewport+1), blank(viewport+2),

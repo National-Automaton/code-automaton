@@ -414,6 +414,14 @@ export class App {
         this.requestRender();
         return;
       case "end":
+        // While scrolled back into history, End returns to the tail -- which is
+        // what the status bar hint has always promised. Otherwise it is the
+        // ordinary end-of-line key.
+        if (this.scroll > 0) {
+          this.scroll = 0;
+          this.requestRender();
+          return;
+        }
         b.end();
         this.requestRender();
         return;
@@ -436,6 +444,11 @@ export class App {
         return;
       case "pagedown":
         this.scrollPage(-1);
+        return;
+      // The mouse wheel reports one event per notch; three lines per notch is
+      // the usual terminal pace and keeps a long transcript quick to traverse.
+      case "wheel":
+        this.scrollBy(k.direction * 3);
         return;
       case "enter":
         this.submit();
@@ -510,20 +523,25 @@ export class App {
   /** Append a local, informational line to the current transcript. */
   private systemNote(text: string): void {
     this.current().entries.push({ role: "tool", name: "coda", ok: true, text });
-    this.scroll = 0;
+    // The note lands at the tail. If the reader has deliberately scrolled back
+    // into history, leave their offset alone: a note arriving (an attachment, a
+    // status message) should not yank the transcript out from under them.
     this.requestRender();
   }
 
   /** Scroll the transcript by `delta` lines (positive = back in history). */
   private scrollBy(delta: number): void {
-    const maxOffset = Math.max(0, this.screen.totalLines - this.screen.viewportRows);
+    const maxOffset = Math.max(
+      0,
+      this.screen.totalLines - this.screen.viewportRowsForInput(this.input.value)
+    );
     this.scroll = Math.max(0, Math.min(this.scroll + delta, maxOffset));
     this.requestRender();
   }
 
   /** Jump the transcript by a screenful. */
   private scrollPage(direction: 1 | -1): void {
-    this.scrollBy(direction * Math.max(1, this.screen.viewportRows - 1));
+    this.scrollBy(direction * Math.max(1, this.screen.viewportRowsForInput(this.input.value) - 1));
   }
 
   private openPicker(): void {

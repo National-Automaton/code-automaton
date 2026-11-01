@@ -34,6 +34,8 @@ new session. The picker has a text prompt:
 | `Alt+B` / `Alt+F` | Move back / forward one word |
 | `↑` / `↓` | Scroll transcript one line |
 | `PgUp` / `PgDn` | Scroll transcript one page |
+| Mouse wheel | Scroll transcript (3 lines per notch) |
+| `End` (scrolled back) | Jump back to the newest output |
 | `Ctrl+R` | Open the session picker |
 | *type* (in picker) | `Enter` starts a **new** session with that text (does not filter the list) |
 | `↑` / `↓` (in picker) | Move through sessions |
@@ -49,6 +51,34 @@ new session. The picker has a text prompt:
 
 Sessions are saved as JSON in `~/.coda/sessions/` (mode `600`) and reloaded the
 next time you start `coda`.
+
+### Scrolling back
+
+Long answers and tool output scroll past the visible window. `coda` keeps the
+whole transcript of the session and scrolls through it:
+
+- **Mouse wheel** — scrolls the transcript a few lines per notch.
+- **`↑`/`↓`** — one line at a time; **`PgUp`/`PgDn`** — a page.
+- **`End`** — returns to the newest output.
+
+The header shows `▲ scrolled back N` while you are reading history. Scrolling is
+independent of streaming: a reply that is still arriving keeps appending at the
+tail without yanking you back down, so you can read earlier output while the
+model is still writing.
+
+`coda` enables terminal mouse reporting (SGR, `1000`+`1006`) while it runs, so
+the wheel scrolls *its* transcript — the whole session, not just what happens to
+be on screen. The tradeoff is that the terminal stops doing its own wheel
+scrollback and drag-to-select while `coda` is open; hold **`Shift`** while
+dragging to select and copy text, which is the standard escape hatch in Windows
+Terminal and most other emulators. Mouse reporting is switched off on exit,
+including on `Ctrl+C` and `SIGTERM`.
+
+`coda` also repaints its frame in place rather than erasing the screen on every
+render. A full-screen erase per frame — and with a streaming reply there is one
+per chunk — left the terminal with nothing to scroll. The screen is cleared once
+at startup; after that each frame overwrites in place, and the last frame is
+left on screen at exit so it stays in the terminal's own scrollback.
 
 ### Renaming a session
 
