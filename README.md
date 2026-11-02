@@ -48,6 +48,7 @@ new session. The picker has a text prompt:
 | `Ctrl+T` | New session |
 | `Ctrl+X` | Close the current session |
 | `Ctrl+C` | Exit |
+| `/help` | Show the command and key reference |
 | `/quit` · `/exit` | Exit (same as typing `quit` / `exit`; sessions are saved) |
 
 Sessions are saved as JSON in `~/.coda/sessions/` (mode `600`) and reloaded the
@@ -204,15 +205,20 @@ Windows side via PowerShell. On macOS/Linux use `/image <path>`.
 
 ## Commands
 
-Slash commands are typed into the input and sent with Enter. They are matched
-exactly, so a message that merely *starts* with `/quit…` still reaches the
-model.
+Slash commands are typed into the input and sent with Enter.
 
 | Command | What it does |
 | --- | --- |
+| `/help`, `/?` | Print the command and key reference into the transcript |
 | `/quit`, `/exit` | Exit `coda` and save sessions. Same as typing `quit` / `exit`, or `Ctrl+C` |
 | `/paste` | Attach the clipboard image (see [Images](#images)) |
 | `/image <path>` | Attach an image file (see [Images](#images)) |
+
+A line that begins with `/` but names no known command is **not** sent to the
+model. Instead `coda` reports `unknown command: …` in the transcript and leaves
+your text in the input so you can correct it (or press `Esc` to clear it). This
+keeps a typo like `/quti` from being interpreted as a prompt. A bare `/` on its
+own is exempt and is sent as ordinary text (e.g. a pasted absolute path).
 
 ## Config
 
