@@ -328,11 +328,26 @@ export class Screen {
         // Always show the highlight: the query no longer filters the list, so
         // suppressing the highlight while typing made the selection invisible.
         const active = p.items.length > 0 && i === p.index;
-        const prefix = active ? REVERSE + "▸ " : "  ";
-        const labelWidth = Math.max(10, width - 20);
+        // A row must never exceed `width`, or the terminal soft-wraps it onto a
+        // second physical line. The cursor is then placed by counting logical
+        // rows, so it lands below the entry field it belongs to. That happened
+        // whenever `detail` was long ("12 msgs · thinking · <long date>") and at
+        // every terminal width, because only the label was ever truncated.
+        //
+        // Budget the row explicitly: prefix(2) + label + gap(1) + detail, capped
+        // at width - 1 so a full row still cannot trigger auto-wrap.
+        const rowWidth = Math.max(10, width - 1);
+        const detailWidth = Math.max(0, Math.min(24, Math.floor(rowWidth / 2) - 3));
+        const labelWidth = Math.max(4, rowWidth - 2 - detailWidth - 1);
         const label = `${item.label}`.padEnd(labelWidth).slice(0, labelWidth);
-        const line = prefix + label + " " + DIM + item.detail + RESET;
-        out.push(active ? REVERSE + line.padEnd(width) + RESET : line);
+        const detail = `${item.detail}`.slice(0, detailWidth);
+        const prefix = active ? "▸ " : "  ";
+        const text = (prefix + label + " " + detail).slice(0, rowWidth);
+        if (active) {
+          out.push(REVERSE + text.padEnd(rowWidth) + RESET);
+        } else {
+          out.push("  " + label + " " + DIM + detail + RESET);
+        }
       }
       if (p.items.length === 0 && listHeight > 0) {
         out.push(DIM + "  (no sessions)" + RESET);
@@ -350,10 +365,18 @@ export class Screen {
       for (let i = 0; i < queryRows.length; i++) {
         out.push((i === 0 ? CYAN + "> " + RESET : "  ") + queryRows[i]);
       }
+      // Hint rows are single lines, so each is clamped to the terminal width.
+      // An overlong hint (a long session title in the rename prompt, or a long
+      // delete-confirm title) soft-wraps onto a second line, which shifts every
+      // row below it -- including the entry field, whose cursor is placed by
+      // counting logical rows.
+      const fit = (text: string): string => text.slice(0, Math.max(1, width - 1));
       if (p.rename) {
         out.push(
           DIM +
-            `rename "${p.rename.title}" · Enter save · Esc cancel · empty resets to auto-title` +
+            fit(
+              `rename "${p.rename.title}" · Enter save · Esc cancel · empty resets to auto-title`
+            ) +
             RESET
         );
       } else if (p.confirmDelete !== null) {
@@ -365,15 +388,17 @@ export class Screen {
             `Delete "${label}"? ` +
             RESET +
             YELLOW +
-            "y to confirm · any other key cancels" +
+            fit("y to confirm · any other key cancels") +
             RESET
         );
       } else {
         out.push(
           DIM +
-            "↑/↓ pick · Enter " +
-            (p.query ? "start new session" : "open session") +
-            " · d delete · r rename · Esc cancel" +
+            fit(
+              "↑/↓ pick · Enter " +
+                (p.query ? "start new session" : "open session") +
+                " · d delete · r rename · Esc cancel"
+            ) +
             RESET
         );
       }
