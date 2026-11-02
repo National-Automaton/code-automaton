@@ -9,8 +9,8 @@ import type { AttachedImage } from "./image.js";
 
 /**
  * Owns the whole TUI: the list of live sessions, which one is active, and the
- * picker overlay. Left-arrow (or Ctrl+R / /resume) opens the picker without
- * leaving the running app, so several sessions stay live at once.
+ * picker overlay. Left-arrow (or Ctrl+R) opens the picker without leaving the
+ * running app, so several sessions stay live at once.
  */
 export class App {
   private sessions: Session[] = [];
@@ -137,10 +137,20 @@ export class App {
     return this.sessions;
   }
 
-  /** Keep the picker index inside the list. */
-  private clampPickerIndex(): void {
+  /**
+   * Keep the picker index inside the list.
+   *
+   * Deleting an entry (Ctrl+X) splices it out, so the rows after it shift up.
+   * Clamping alone would leave the *same numeric* index selected -- now the
+   * session after the one deleted -- so after a delete the highlight is pulled
+   * back by the amount the list shrank. That keeps the caret on the row that
+   * took the deleted one's place, which is where the eye already is, and it
+   * still can't leave an empty list selected.
+   */
+  private clampPickerIndex(shrunk = false): void {
     if (!this.picker) return;
     const n = this.pickerSessions().length;
+    if (shrunk && this.picker.index > n - 1) this.picker.index = Math.max(0, this.picker.index - 1);
     this.picker.index = n === 0 ? 0 : Math.min(this.picker.index, n - 1);
     if (this.picker.index < 0) this.picker.index = 0;
   }
@@ -268,6 +278,25 @@ export class App {
         return;
       case "enter": {
         const text = q.value.trim();
+        if (this.looksLikeCommand(text)) {
+          // Slash input is a coda command, not the new session's first
+          // message. Run it here, then close the picker and show the result
+          // in the transcript -- otherwise "/help" would create a session
+          // named after it and hand it to the model as a prompt.
+          //
+          // A command that did not run (an unknown one) leaves the picker
+          // open, so the message is still on screen and can be corrected
+          // instead of disappearing along with the overlay.
+          const ran = this.runSlashCommand(text, true);
+          if (ran) {
+            this.picker = null;
+            q.clear();
+          } else {
+            q.home();
+          }
+          this.requestRender();
+          return;
+        }
         if (text) {
           // Typed something => start a brand-new session with it.
           this.startNewSessionWith(text);
@@ -288,6 +317,17 @@ export class App {
         if (k.ch === "b") q.wordLeft();
         else if (k.ch === "f") q.wordRight();
         else if (k.ch === "d") q.deleteWordRight();
+        else if (k.ch === "r") {
+          // Rename the highlighted session, not the active one: the list is
+          // what you are looking at, and the chat view's Alt+R is one keypress
+          // away for the session you already have open. Close the picker so
+          // the title editor is not hidden behind the overlay.
+          if (n > 0) {
+            const target = items[p.index];
+            this.picker = null;
+            this.startRename(target);
+          }
+        }
         this.requestRender();
         return;
       }
@@ -302,7 +342,8 @@ export class App {
         // title then appeared in the field as if it had been typed, and Enter
         // renamed that session instead of starting a new one. Since the query
         // never filters the list, a character can only ever be text here.
-        // Rename is Alt+R and delete is Ctrl+X in the chat view.
+        // Rename is Alt+R and delete is Ctrl+X, in both this overlay and the
+        // chat view -- modifier chords, so they never collide with typing.
         q.insert(k.ch);
         this.clampPickerIndex();
         this.requestRender();
@@ -314,13 +355,42 @@ export class App {
         else if (k.ch === "u") { q.deleteToStart(); this.clampPickerIndex(); this.requestRender(); }
         else if (k.ch === "k") { q.deleteToEnd(); this.clampPickerIndex(); this.requestRender(); }
         else if (k.ch === "w") { q.deleteWordLeft(); this.clampPickerIndex(); this.requestRender(); }
+        else if (k.ch === "x") {
+          // Delete the highlighted session, not the active one. closeSession()
+          // already refuses to kill a turn that is still running, so this is a
+          // no-op on a "thinking" row rather than an error. Pass fromPicker so
+          // the highlight follows the row that shifts into the deleted slot.
+          if (n > 0) {
+            this.closeSession(items[p.index], true);
+            this.requestRender();
+          }
+        }
         else if (k.ch === "v") void this.pasteImageFromClipboard();
+        return;
+      default:
+        // Scroll keys keep working over the overlay: the transcript is still
+        // drawn above the picker, and a wheel notch or PgUp while the list is
+        // open should move it rather than doing nothing at all.
+        if (k.type === "pageup") this.scrollPage(1);
+        else if (k.type === "pagedown") this.scrollPage(-1);
+        else if (k.type === "wheel") this.scrollBy(k.direction * 3);
         return;
     }
   }
 
-  /** Create a session and immediately send `text` as its first message. */
-  private startNewSessionWith(text: string): void {
+  /**
+   * Create a session and immediately send `text` as its first message.
+   * `images` ride along with that first message (a screenshot attached with
+   * `/image` or `/paste` and then sent on an empty session).
+   */
+  private startNewSessionWith(text: string, images: AttachedImage[] = []): void {
+    // Belt and braces: slashes are commands. Every caller already checks, but
+    // the one thing this method must never do is hand a command to the model
+    // as a new session's opening prompt.
+    if (this.looksLikeCommand(text.trim())) {
+      this.runSlashCommand(text.trim());
+      return;
+    }
     this.pruneEmptySessions();
     const session = new Session(this.config);
     this.sessions.push(session);
@@ -328,7 +398,7 @@ export class App {
     this.input.clear();
     this.scroll = 0;
     if (session.status === "idle") {
-      void session.run(text, () => this.requestRender());
+      void session.run(text, () => this.requestRender(), images);
     }
   }
 
@@ -353,8 +423,14 @@ export class App {
     this.scroll = 0;
   }
 
-  /** Delete a session by reference, keeping indices valid. */
-  private closeSession(session: Session): void {
+  /**
+   * Delete a session by reference, keeping indices valid.
+   *
+   * `fromPicker` tells the clamp that the picker list just shrank, so the
+   * highlight should follow the row that moved into the deleted one's place
+   * rather than staying on the same numeric index.
+   */
+  private closeSession(session: Session, fromPicker = false): void {
     if (session.status === "thinking") return; // don't kill a running turn
     const idx = this.sessions.indexOf(session);
     if (idx === -1) return;
@@ -362,7 +438,7 @@ export class App {
     this.sessions.splice(idx, 1);
     if (this.sessions.length === 0) this.sessions.push(new Session(this.config));
     if (this.active >= this.sessions.length) this.active = this.sessions.length - 1;
-    this.clampPickerIndex();
+    this.clampPickerIndex(fromPicker);
   }
 
   private onChatKey(k: Key): void {
@@ -529,6 +605,7 @@ export class App {
         "  Ctrl+R              Open the session picker",
         "  Ctrl+T / Ctrl+X     New session / close current session",
         "  Alt+R               Rename the current session",
+        "  In the picker:  ↑/↓ move · Enter open · Ctrl+X delete · Alt+R rename",
         "  Ctrl+V              Attach a clipboard image (image-only clipboard)",
         "  ↑ / ↓  PgUp / PgDn  Scroll transcript · End returns to the newest output",
         "  Ctrl+C              Exit",
@@ -603,65 +680,37 @@ export class App {
     this.requestRender();
   }
 
+  /**
+   * True for any line that is a command rather than a prompt: it begins with
+   * "/" (with something after it).
+   *
+   * A lone "/" is exempt. That is plausibly the start of a pasted absolute
+   * path, or of prose the user meant to send, so it stays a prompt.
+   *
+   * Every path that turns typed text into a message must consult this. Slash
+   * input is a coda command, and must never reach the model as a prompt or be
+   * used to name a new session.
+   */
+  private looksLikeCommand(text: string): boolean {
+    return text.startsWith("/") && text.length > 1;
+  }
+
   private submit(): void {
     const text = this.input.value.trim();
     if (!text) return;
 
-    // `/image <path>` attaches a screenshot to the next message instead of
-    // sending it. Images cannot travel through a tool result, so they are
-    // attached to the user message itself.
-    // `/paste` pulls an image straight off the Windows clipboard. Windows
-    // Terminal cannot hand image data to a program through the paste stream,
-    // so the clipboard is read from the Windows side instead.
-    if (text === "/help" || text === "/?") {
-      this.input.clear();
-      this.showHelp();
+    // Slash input is always a command, never a prompt.
+    if (this.looksLikeCommand(text)) {
+      this.runSlashCommand(text);
       return;
     }
-    if (text === "/paste") {
-      this.input.clear();
-      void this.pasteFromClipboard();
-      return;
-    }
-    // `/image <path>` — match the command word only, so `/imagefoo` is not
-    // swallowed as an `/image` command with argument "foo".
-    if (text === "/image" || text.startsWith("/image ")) {
-      const arg = text.slice("/image".length).trim();
-      this.input.clear();
-      void this.attachImage(arg);
-      return;
-    }
-    // `/rename <title>` renames the current session outright. `/rename` alone
-    // opens the interactive title editor instead (same as Alt+R), so the title
-    // can be edited in place rather than retyped from scratch.
-    if (text === "/rename" || text.startsWith("/rename ")) {
-      const title = text.slice("/rename".length).trim();
-      this.input.clear();
-      if (title) void this.current().rename(title);
-      else this.startRename(this.current());
-      this.requestRender();
-      return;
-    }
+
+    // The bare words are the long-standing spelling of /quit and /exit.
     if (text === "exit" || text === "quit") {
       this.quit();
       return;
     }
-    // `/quit` and `/exit` are the slash-command spelling of the bare words
-    // above. Matched exactly (no trailing space handled, since there is no
-    // argument).
-    if (text === "/quit" || text === "/exit") {
-      this.quit();
-      return;
-    }
-    // Any other line beginning with `/` is (almost certainly) a mistyped or
-    // unsupported command. Sending it to the model as a prompt is never what
-    // was intended, so report it and keep the text in the input for editing.
-    // A lone `/` is exempt: that is plausibly the start of a pasted absolute
-    // path or of text the user meant to send.
-    if (text.startsWith("/") && text.length > 1) {
-      this.unknownCommand(text);
-      return;
-    }
+
     const session = this.current();
     if (session.status === "thinking") {
       // A turn is running: hand the text to it rather than dropping it. It
@@ -680,20 +729,74 @@ export class App {
     this.pendingImages = [];
 
     if (session.entries.length === 0) {
-      this.startNewSessionWith(text);
-      // startNewSessionWith creates a new session; hand the attachments to it.
-      if (images.length) {
-        const fresh = this.current();
-        this.input.clear();
-        this.scroll = 0;
-        void fresh.run(text, () => this.requestRender(), images);
-      }
+      // startNewSessionWith runs the turn; hand it the attachments so the
+      // image rides along with the first message rather than being lost --
+      // and so the turn is started once, not once here and once below.
+      this.startNewSessionWith(text, images);
     } else {
       this.input.clear();
       this.scroll = 0; // jump back to the tail so you see the reply
       void session.run(text, () => this.requestRender(), images);
     }
     this.requestRender();
+  }
+
+  /**
+   * Run a slash command. Called with text already known to start with "/",
+   * from the chat input and from the session picker alike.
+   */
+  private runSlashCommand(text: string, fromPicker = false): boolean {
+    // Commands run from the picker must not clear the chat input: the text in
+    // it belongs to the session behind the overlay (a half-typed draft), not
+    // to the command line the command was typed on. `clrInput` therefore only
+    // clears when the command came from the chat input itself.
+    const clrInput = () => {
+      if (!fromPicker) this.input.clear();
+    };
+    // `/image <path>` attaches a screenshot to the next message instead of
+    // sending it. Images cannot travel through a tool result, so they are
+    // attached to the user message itself.
+    // `/paste` pulls an image straight off the Windows clipboard. Windows
+    // Terminal cannot hand image data to a program through the paste stream,
+    // so the clipboard is read from the Windows side instead.
+    if (text === "/help" || text === "/?") {
+      clrInput();
+      this.showHelp();
+      return true;
+    }
+    if (text === "/paste") {
+      clrInput();
+      void this.pasteFromClipboard();
+      return true;
+    }
+    // `/image <path>` — match the command word only, so `/imagefoo` is not
+    // swallowed as an `/image` command with argument "foo".
+    if (text === "/image" || text.startsWith("/image ")) {
+      const arg = text.slice("/image".length).trim();
+      clrInput();
+      void this.attachImage(arg);
+      return true;
+    }
+    // `/rename <title>` renames the current session outright. `/rename` alone
+    // opens the interactive title editor instead (same as Alt+R), so the title
+    // can be edited in place rather than retyped from scratch.
+    if (text === "/rename" || text.startsWith("/rename ")) {
+      const title = text.slice("/rename".length).trim();
+      clrInput();
+      if (title) void this.current().rename(title);
+      else this.startRename(this.current());
+      this.requestRender();
+      return true;
+    }
+    if (text === "/quit" || text === "/exit") {
+      this.quit();
+      return true;
+    }
+    // Anything else beginning with "/" is a mistyped or unsupported command.
+    // Sending it to the model as a prompt is never what was intended, so we
+    // say so rather than guessing at the intent.
+    this.unknownCommand(text);
+    return false;
   }
 
   private quit(): void {
