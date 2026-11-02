@@ -38,13 +38,28 @@ export class Agent {
     private config: Config,
     messages?: ChatCompletionMessageParam[]
   ) {
+    // Use the runtime's built-in fetch rather than the SDK's default.
+    //
+    // openai@4 keeps a node-fetch@2 fallback for old Node versions and uses it
+    // whenever no `fetch` is supplied. On Node 20.19.2 that combination breaks
+    // streaming: node-fetch's chunked-response handling ends one chunk early
+    // and raises `ERR_STREAM_PREMATURE_CLOSE` ("Premature close") at the end of
+    // every reply -- plain and tool-calling alike. The text has already
+    // streamed by then, but the turn is recorded as failed, so the tool never
+    // runs and the unanswered prompt is re-sent on the next turn.
+    //
+    // Node 18+ has a global fetch (undici), which streams these responses
+    // correctly and is what openai@5 uses by default. Passing it explicitly
+    // keeps every supported Node version on the same code path.
     this.client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseURL,
+      fetch: globalThis.fetch,
     });
     this.visionClient = new OpenAI({
       apiKey: config.visionApiKey,
       baseURL: config.visionBaseURL,
+      fetch: globalThis.fetch,
     });
     this.messages = messages ?? [{ role: "system", content: SYSTEM_PROMPT }];
   }
