@@ -31,6 +31,12 @@ const ERASE_LINE = ESC + "K";
  */
 const MOUSE_ON = ESC + "?1000h" + ESC + "?1006h";
 const MOUSE_OFF = ESC + "?1006l" + ESC + "?1000l";
+/**
+ * Nothing to write: mouse reporting stays off. The terminal keeps its own
+ * drag-to-select and wheel scrollback, and coda receives no wheel events.
+ * Selected with CODA_MOUSE=off for users who would rather select text.
+ */
+const NO_MOUSE = "";
 const HIDE_CURSOR = ESC + "?25l";
 const SHOW_CURSOR = ESC + "?25h";
 const RESET = ESC + "0m";
@@ -196,9 +202,17 @@ export class Screen {
     return Math.max(1, this.rows - chrome);
   }
 
+  /**
+   * `mouse` selects whether terminal mouse reporting is enabled. When false,
+   * the wheel is left to the terminal (which keeps drag-to-select working) and
+   * coda simply never receives wheel events -- the Up/Down/PgUp/PgDn keys still
+   * scroll the transcript.
+   */
+  constructor(private mouse = true) {}
+
   start(): void {
     stdout.on("resize", this.resizeHandler);
-    stdout.write(CLEAR + HIDE_CURSOR + MOUSE_ON);
+    stdout.write(CLEAR + HIDE_CURSOR + (this.mouse ? MOUSE_ON : NO_MOUSE));
   }
 
   stop(): void {
@@ -206,8 +220,10 @@ export class Screen {
     // Mouse reporting must be turned off or the terminal keeps sending mouse
     // codes to whatever runs next (your shell). Leave the last frame on screen
     // and start a fresh line below it, so the final transcript stays readable
-    // (and in the terminal's scrollback) after exit.
-    stdout.write(MOUSE_OFF + RESET + SHOW_CURSOR + "\n");
+    // (and in the terminal's scrollback) after exit. Only emit the "off"
+    // escape when we turned it on, so a shell running under coda never gets a
+    // stray mode change.
+    stdout.write((this.mouse ? MOUSE_OFF : "") + RESET + SHOW_CURSOR + "\n");
   }
 
   /**

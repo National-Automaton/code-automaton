@@ -77,6 +77,18 @@ dragging to select and copy text, which is the standard escape hatch in Windows
 Terminal and most other emulators. Mouse reporting is switched off on exit,
 including on `Ctrl+C` and `SIGTERM`.
 
+If dragging to select is more important to you than the wheel, disable mouse
+reporting entirely:
+
+```bash
+export CODA_MOUSE=off
+```
+
+`coda` then leaves the mouse alone — the terminal's own drag-to-select and wheel
+scrollback work as usual — and the transcript is scrolled with **`↑`/`↓`**,
+**`PgUp`/`PgDn`**, and **`End`** instead. This is the fix when a terminal does
+not honour Shift-to-select, or when Shift-drag selects unreliably.
+
 `coda` also repaints its frame in place rather than erasing the screen on every
 render. A full-screen erase per frame — and with a streaming reply there is one
 per chunk — left the terminal with nothing to scroll. The screen is cleared once
@@ -231,6 +243,7 @@ own is exempt and is sent as ordinary text (e.g. a pasted absolute path).
 | `CODA_BASE_URL` | `https://api.deepseek.com` (also reads `DEEPSEEK_BASE_URL` / `OPENAI_BASE_URL`) |
 | `CODA_MODEL` | `deepseek-chat` (also reads `DEEPSEEK_MODEL` / `OPENAI_MODEL`) |
 | `CODA_SESSIONS_DIR` | `~/.coda/sessions` (also reads the older `DSC_SESSIONS_DIR`) |
+| `CODA_MOUSE` | `on` — set to `off` to leave mouse selection to the terminal (see [Scrolling back](#scrolling-back)) |
 | `CODA_VISION_MODEL` | the value of `CODA_MODEL` |
 | `CODA_VISION_BASE_URL` | the value of `CODA_BASE_URL` |
 | `CODA_VISION_API_KEY` | the value of `CODA_API_KEY` |
