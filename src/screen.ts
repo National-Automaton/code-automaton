@@ -430,7 +430,7 @@ export class Screen {
           fit(
             "↑/↓ pick · Enter " +
               (p.query ? "start new session" : "open session") +
-              " · type to start a new session"
+              " · type to start a new session · Ctrl+X delete · Alt+R rename"
           ) +
           RESET
       );

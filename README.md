@@ -17,12 +17,18 @@ new session. The picker has a text prompt:
 
 - **Type a message and press Enter** → starts a brand-new session with that
   message as its first turn.
+- **Type `/command` and press Enter** → runs that command (`/help`, `/rename`,
+  …) instead of starting a session. An unknown command is reported in the
+  picker and the picker stays open so you can fix it.
 - **Press Enter with nothing typed** → opens the session highlighted with
   `↑`/`↓`.
+- **`Ctrl+X`** deletes the highlighted session; **`Alt+R`** renames it.
 - Typing does *not* filter the list — use `↑`/`↓` to move through it.
 
 In the picker every printable key is text for the new session's message; no
-letter is a shortcut, so a message can start with any character.
+letter is a shortcut, so a message can start with any character. Delete and
+rename are the modifier chords `Ctrl+X` and `Alt+R`, so they never collide with
+typing.
 
 | Key | Action |
 | --- | --- |
@@ -40,9 +46,11 @@ letter is a shortcut, so a message can start with any character.
 | Mouse wheel | Scroll transcript (3 lines per notch) |
 | `End` (scrolled back) | Jump back to the newest output |
 | `Ctrl+R` | Open the session picker |
-| *type* (in picker) | `Enter` starts a **new** session with that text (does not filter the list) |
+| *type* (in picker) | `Enter` starts a **new** session with that text (does not filter the list). A `/command` runs the command instead |
 | `↑` / `↓` (in picker) | Move through sessions |
 | `Enter` with nothing typed | **Open** the highlighted session |
+| `Ctrl+X` (in picker) | **Delete** the highlighted session |
+| `Alt+R` (in picker) | **Rename** the highlighted session |
 | `Esc` (in picker) | Close the picker |
 | `Alt+R` | Rename the current session (Enter saves, Esc cancels) |
 | `Ctrl+V` | Attach the clipboard image (image-only clipboard; see [Images](#images)) |
@@ -100,7 +108,8 @@ left on screen at exit so it stays in the terminal's own scrollback.
 A session names itself after its first message. To rename it, press **`Alt+R`**
 in the chat view — or type `/rename` — and the input line turns into a title
 editor, pre-filled with the current title. Typing `/rename Some title` renames
-it directly, without the editor.
+it directly, without the editor. From the session picker, **`Alt+R`** renames the
+session currently highlighted in the list.
 
 - **Enter** saves. **Esc** cancels and keeps the old title.
 - `←`/`→`, `Home`/`End`, `Backspace`, and the usual `Ctrl+A`/`Ctrl+E`/`Ctrl+W`

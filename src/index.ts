@@ -45,7 +45,10 @@ Keys:
   End             While scrolled back, return to the newest output
   Ctrl+R          Open the session picker:
                     type + Enter  = start a new session with that message
+                                    (a "/command" runs the command instead)
                     ↑/↓ + Enter   = open the highlighted session
+                    Ctrl+X        = delete the highlighted session
+                    Alt+R         = rename the highlighted session
   Ctrl+T          New session
   Ctrl+X          Close current session
   Alt+R           Rename the current session
