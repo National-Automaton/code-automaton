@@ -308,13 +308,39 @@ export class Screen {
       visible[0] = DIM + "New session. Type a message, or press ← to open a saved one." + RESET;
     }
 
+    // The header is one row, so it must never exceed `width - 1`: a row that
+    // fills the last column triggers the terminal's pending-wrap state and
+    // shifts the whole frame down one -- the same hazard the transcript wrap
+    // guards against. Only the title is unbounded, so the rest is measured
+    // first and the title truncated into what is left. Budgeting the title on
+    // its own was not enough: on a very narrow terminal the fixed parts
+    // (" coda session 1/1 · ") already fill the row, so any "room left for the
+    // title" still produced an over-long header.
+    const brand = " coda ";
+    const sessionPrefix = `session ${s.sessionIndex + 1}/${s.sessionCount} · `;
+    const scrollSuffix = offset > 0 ? ` · ▲ scrolled back ${offset}` : "";
+    const room = Math.max(0, width - 1);
+
+    // The scroll indicator is short and tells you the view is not at the tail,
+    // so it is reserved before the title and the title shrinks instead. Drop it
+    // only when the brand plus the indicator alone fill the row.
+    let scrolled = scrollSuffix;
+    if (brand.length + scrolled.length >= room) scrolled = "";
+
+    const body = sessionPrefix + s.title;
+    const bodyRoom = Math.max(0, room - brand.length - scrolled.length);
+    let bodyText = body;
+    if (bodyText.length > bodyRoom) {
+      bodyText = bodyRoom >= 2 ? bodyText.slice(0, bodyRoom - 1) + "…" : bodyText.slice(0, bodyRoom);
+    }
+
     const header =
       BOLD +
-      ` coda ` +
+      brand +
       RESET +
       DIM +
-      `session ${s.sessionIndex + 1}/${s.sessionCount} · ${s.title}` +
-      (offset > 0 ? ` · ${YELLOW}▲ scrolled back ${offset}${RESET}` : "") +
+      bodyText +
+      (scrolled ? ` · ${YELLOW}${scrolled.slice(3)}${RESET}` : "") +
       RESET;
 
     // Content lines only -- CLEAR is written separately before them, so it
