@@ -77,8 +77,35 @@ jobs:
 
       # Staged, not published: this lands in npm's staging area and waits for a
       # human to approve it. Provenance is attached here, at build time.
+      # Staging fails with E409 if the version is already staged or published.
+      # That is easy to hit: re-running after a cancel or a transient failure,
+      # or cancelling just after the stage request lands. The public registry
+      # cannot answer this question -- a staged version is not served from
+      # registry.npmjs.org and returns 404 there -- so `npm stage list` is the
+      # only reliable check. Querying the registry instead is what led to a
+      # cancelled run's version being reported as "not staged", only for the
+      # next run to fail on E409.
       - name: Stage the release
-        run: npm stage publish . --provenance --access public
+        run: |
+          set -o pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          VESC="$(printf '%s' "$VERSION" | sed 's/\./\\./g')"
+
+          # Already staged (awaiting approval), or already published: nothing
+          # to do. Fail only if `npm stage list` itself errors, since silently
+          # skipping a genuine first-time stage would be worse than stopping.
+          if npm stage list "code-automaton@${VERSION}" > /tmp/staged.txt 2>/tmp/staged.err; then
+            # Whole-version match: 1.4.1 must not match 1.4.10 or 1.4.1-beta1.
+            if grep -qE "(^|[^0-9A-Za-z.-])${VESC}([^0-9A-Za-z.-]|$)" /tmp/staged.txt; then
+              echo "::notice::code-automaton@${VERSION} is already staged; skipping. Approve it in the npm web UI."
+              exit 0
+            fi
+          else
+            echo "::warning::could not list staged versions; attempting to stage anyway"
+            tail -5 /tmp/staged.err | sed 's/^/  /'
+          fi
+
+          npm stage publish . --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
