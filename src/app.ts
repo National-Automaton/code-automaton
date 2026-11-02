@@ -16,18 +16,14 @@ export class App {
   private sessions: Session[] = [];
   private active = 0;
   private input = new LineBuffer();
+  /** Picker state: highlighted row and the "start a new session" field. */
+  private picker: { index: number; query: LineBuffer } | null = null;
   /**
-   * Picker state. `confirmDelete` holds the id of the session awaiting a
-   * delete confirmation, so a stray `d` can't destroy a session. `rename` is
-   * non-null while a title is being edited: it holds the target session and
-   * the edit buffer, which starts pre-filled with the current title.
+   * Title editor, non-null while a session's title is being edited (Alt+R in
+   * the chat view). It holds the target session and the edit buffer, which
+   * starts pre-filled with the current title.
    */
-  private picker: {
-    index: number;
-    query: LineBuffer;
-    confirmDelete: string | null;
-    rename: { id: string; buffer: LineBuffer } | null;
-  } | null = null;
+  private rename: { id: string; buffer: LineBuffer } | null = null;
   /** Lines scrolled back from the tail of the transcript. */
   private scroll = 0;
   private screen = new Screen();
@@ -109,17 +105,16 @@ export class App {
             items,
             index: this.picker.index,
             query: this.picker.query.value,
-            confirmDelete:
-              this.sessions.find((s) => s.id === this.picker?.confirmDelete)?.title ?? null,
-            rename: this.picker.rename
-              ? {
-                  title: this.sessions.find((s) => s.id === this.picker!.rename!.id)?.title ?? "",
-                  value: this.picker.rename.buffer.value,
-                  cursor: this.picker.rename.buffer.cursor,
-                }
-              : null,
           }
         : null,
+      rename:
+        this.rename && !this.picker
+          ? {
+              title: this.sessions.find((s) => s.id === this.rename!.id)?.title ?? "",
+              value: this.rename.buffer.value,
+              cursor: this.rename.buffer.cursor,
+            }
+          : null,
     });
   }
 
@@ -130,6 +125,11 @@ export class App {
    * query made the highlighted row jump around as you typed, and the query line
    * is where the caret rendering went wrong; selection is by arrow keys only.
    * The text box remains, but purely as "start a new session with this message".
+   *
+   * Nothing else may claim a typed character, either: since the query never
+   * filters, a keystroke can only ever be text for the new session. That is
+   * why the old "empty prompt + `d`/`r`" shortcuts are gone (see
+   * `onPickerKey`).
    */
   private pickerSessions(): Session[] {
     return this.sessions;
@@ -145,37 +145,36 @@ export class App {
 
   private onKey(k: Key): void {
     if (this.quitting) return;
-    if (this.picker?.rename) this.onRenameKey(k);
+    if (this.rename) this.onRenameKey(k);
     else if (this.picker) this.onPickerKey(k);
     else this.onChatKey(k);
   }
 
-  /** Begin editing the highlighted session's title, pre-filled with the current one. */
+  /** Begin editing the active session's title, pre-filled with the current one. */
   private startRename(session: Session): void {
-    if (!this.picker) return;
     const buffer = new LineBuffer();
     buffer.set(session.title);
-    this.picker.rename = { id: session.id, buffer };
-    this.picker.confirmDelete = null;
+    this.rename = { id: session.id, buffer };
+    this.requestRender();
   }
 
   /**
    * Keys while a title is being edited: Enter saves, Esc cancels, and the rest
-   * are ordinary line editing. Every key is consumed here so a stray `d` during
-   * a rename edits the title instead of deleting the session.
+   * are ordinary line editing. Every key is consumed here so nothing typed
+   * into a title can reach the chat view.
    */
   private onRenameKey(k: Key): void {
-    const r = this.picker!.rename!;
+    const r = this.rename!;
     const b = r.buffer;
     const target = this.sessions.find((s) => s.id === r.id);
 
     switch (k.type) {
       case "enter":
-        this.picker!.rename = null;
+        this.rename = null;
         if (target) void target.rename(b.value);
         break;
       case "escape":
-        this.picker!.rename = null; // discard the edit
+        this.rename = null; // discard the edit
         break;
       case "left":
         b.left();
@@ -236,11 +235,7 @@ export class App {
         this.requestRender();
         return;
       case "escape":
-        if (p.confirmDelete) {
-          p.confirmDelete = null; // cancel just the confirmation
-        } else {
-          this.picker = null;
-        }
+        this.picker = null;
         this.requestRender();
         return;
       case "left":
@@ -295,27 +290,19 @@ export class App {
         return;
       }
       case "char":
-        // A pending delete confirmation swallows the next key.
-        if (p.confirmDelete) {
-          const target = this.sessions.find((s) => s.id === p.confirmDelete);
-          if (k.ch === "y" || k.ch === "d") {
-            if (target) this.closeSession(target);
-          }
-          p.confirmDelete = null;
-          this.requestRender();
-          return;
-        }
-        if (k.ch === "d" && q.value === "" && n > 0) {
-          p.confirmDelete = items[p.index].id;
-        } else if (k.ch === "r" && q.value === "" && n > 0) {
-          // `r` renames the highlighted session. Outside rename mode it only
-          // acts on an empty prompt, so typing a message that contains "r"
-          // still works.
-          this.startRename(items[p.index]);
-        } else {
-          q.insert(k.ch);
-          this.clampPickerIndex();
-        }
+        // Every printable key is text for the new session's first message.
+        //
+        // It used to be that `d` and `r` on an empty prompt meant delete and
+        // rename. Those were not commands any user could discover, and they
+        // silently broke the one job the field has: typing "debug ..." armed a
+        // delete confirmation, and typing "refactor ..." opened a rename editor
+        // pre-filled with the highlighted session's title. The highlighted
+        // title then appeared in the field as if it had been typed, and Enter
+        // renamed that session instead of starting a new one. Since the query
+        // never filters the list, a character can only ever be text here.
+        // Rename is Alt+R and delete is Ctrl+X in the chat view.
+        q.insert(k.ch);
+        this.clampPickerIndex();
         this.requestRender();
         return;
       case "ctrl":
@@ -395,11 +382,14 @@ export class App {
         else if (k.ch === "k") { b.deleteToEnd(); this.requestRender(); }
         else if (k.ch === "w") { b.deleteWordLeft(); this.requestRender(); }
         else if (k.ch === "v") void this.pasteImageFromClipboard();
+        // Ctrl+E is end-of-line, so renaming lives on Alt+R: it acts on the
+        // whole session rather than the line, and the picker's own `r` is gone.
         return;
       case "alt":
         if (k.ch === "b") { b.wordLeft(); this.requestRender(); }
         else if (k.ch === "f") { b.wordRight(); this.requestRender(); }
         else if (k.ch === "d") { b.deleteWordRight(); this.requestRender(); }
+        else if (k.ch === "r") this.startRename(this.current());
         return;
       case "escape":
         b.clear();
@@ -529,12 +519,14 @@ export class App {
         "  /quit, /exit        Exit and save sessions (same as quit / exit, or Ctrl+C)",
         "  /paste              Attach the image on the Windows clipboard (WSL)",
         "  /image <path>       Attach an image file to your next message",
+        "  /rename <title>     Rename the current session (no title: edit it interactively)",
         "",
         "Keys:",
         "  Enter               Send the line (mid-turn, fold it into the running turn)",
         "  ←                   Empty input: open session picker",
         "  Ctrl+R              Open the session picker",
         "  Ctrl+T / Ctrl+X     New session / close current session",
+        "  Alt+R               Rename the current session",
         "  Ctrl+V              Attach a clipboard image (image-only clipboard)",
         "  ↑ / ↓  PgUp / PgDn  Scroll transcript · End returns to the newest output",
         "  Ctrl+C              Exit",
@@ -589,8 +581,6 @@ export class App {
     this.picker = {
       index: Math.max(0, idx),
       query: new LineBuffer(),
-      confirmDelete: null,
-      rename: null,
     };
     this.requestRender();
   }
@@ -637,6 +627,17 @@ export class App {
       const arg = text.slice("/image".length).trim();
       this.input.clear();
       void this.attachImage(arg);
+      return;
+    }
+    // `/rename <title>` renames the current session outright. `/rename` alone
+    // opens the interactive title editor instead (same as Alt+R), so the title
+    // can be edited in place rather than retyped from scratch.
+    if (text === "/rename" || text.startsWith("/rename ")) {
+      const title = text.slice("/rename".length).trim();
+      this.input.clear();
+      if (title) void this.current().rename(title);
+      else this.startRename(this.current());
+      this.requestRender();
       return;
     }
     if (text === "exit" || text === "quit") {
