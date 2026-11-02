@@ -91,16 +91,28 @@ jobs:
           VERSION="$(node -p "require('./package.json').version")"
           VESC="$(printf '%s' "$VERSION" | sed 's/\./\\./g')"
 
-          # Already staged (awaiting approval), or already published: nothing
-          # to do. Fail only if `npm stage list` itself errors, since silently
-          # skipping a genuine first-time stage would be worse than stopping.
-          if npm stage list "code-automaton@${VERSION}" > /tmp/staged.txt 2>/tmp/staged.err; then
+          # `npm stage list` takes a package NAME, not a version range:
+          #   npm stage list code-automaton          -> valid
+          #   npm stage list code-automaton@1.4.2    -> EUSAGE
+          # Passing a version made every run warn and fail open, so the dedupe
+          # below never actually ran.
+          if npm stage list code-automaton > /tmp/staged.txt 2>/tmp/staged.err; then
             # Whole-version match: 1.4.1 must not match 1.4.10 or 1.4.1-beta1.
             if grep -qE "(^|[^0-9A-Za-z.-])${VESC}([^0-9A-Za-z.-]|$)" /tmp/staged.txt; then
               echo "::notice::code-automaton@${VERSION} is already staged; skipping. Approve it in the npm web UI."
               exit 0
             fi
           else
+            # A usage error means the command's interface changed under us, so
+            # the check is no longer doing its job. Say so loudly rather than
+            # degrading to a warning nobody reads. Anything else (auth, network)
+            # is expected to be transient: warn and stage anyway, because
+            # skipping a genuine first-time stage would be worse.
+            if grep -qE "EUSAGE" /tmp/staged.err; then
+              echo "::error::'npm stage list' rejected its arguments; the dedupe check did not run"
+              tail -5 /tmp/staged.err | sed 's/^/  /'
+              exit 1
+            fi
             echo "::warning::could not list staged versions; attempting to stage anyway"
             tail -5 /tmp/staged.err | sed 's/^/  /'
           fi
