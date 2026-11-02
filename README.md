@@ -247,11 +247,25 @@ explicit `CODA_BASE_URL` if you rely on that fallback.
 
 ## Releasing
 
-Releases are staged by CI on a version tag, then approved by hand:
+Releases are staged by CI on a version tag, then approved by hand. `main` is
+protected, so the version bump must land through a pull request — a direct
+`git push` to `main` is rejected by the repository rule, and a tag pushed before
+the bump is merged would point at a commit that is not on the branch. The order
+below keeps the two consistent:
 
 ```bash
-npm version patch          # or minor / major
-git push && git push origin v$(node -p "require('./package.json').version")
+# 1. Bump the version on a branch (npm version also builds dist/).
+npm version patch                 # or minor / major — commits 1.4.3 + tags locally
+git switch -c chore/release-$(node -p "require('./package.json').version")
+git push -u origin chore/release-$(node -p "require('./package.json').version")
+
+# 2. Open a PR and merge it. Do NOT squash: that rewrites the commit the
+#    local version tag points at. Use a merge commit or fast-forward.
+gh pr create --fill && gh pr merge --merge
+
+# 3. Now push the tag, once its commit is on main.
+git switch main && git pull --ff-only
+git push origin v$(node -p "require('./package.json').version")
 ```
 
 CI builds, checks the tag matches `package.json`, smoke-tests the artifact and
@@ -263,7 +277,7 @@ it is why the CI token needs no 2FA bypass. Once approved, mark the release
 Latest:
 
 ```bash
-gh release edit v1.2.2 --latest
+gh release edit v1.4.3 --latest   # substitute the version just released
 ```
 
 The release is created with `--latest=false` because a staged version is not
