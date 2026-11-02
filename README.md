@@ -21,6 +21,9 @@ new session. The picker has a text prompt:
   `↑`/`↓`.
 - Typing does *not* filter the list — use `↑`/`↓` to move through it.
 
+In the picker every printable key is text for the new session's message; no
+letter is a shortcut, so a message can start with any character.
+
 | Key | Action |
 | --- | --- |
 | `Enter` | Send the current line — or, mid-turn, fold it into the running turn |
@@ -40,10 +43,8 @@ new session. The picker has a text prompt:
 | *type* (in picker) | `Enter` starts a **new** session with that text (does not filter the list) |
 | `↑` / `↓` (in picker) | Move through sessions |
 | `Enter` with nothing typed | **Open** the highlighted session |
-| `d` (in picker) | Delete highlighted session (asks for confirmation) |
-| `r` (in picker) | Rename highlighted session (Enter saves, Esc cancels) |
-| `y` | Confirm deletion (any other key cancels) |
-| `Esc` (in picker) | Cancel |
+| `Esc` (in picker) | Close the picker |
+| `Alt+R` | Rename the current session (Enter saves, Esc cancels) |
 | `Ctrl+V` | Attach the clipboard image (image-only clipboard; see [Images](#images)) |
 | `Ctrl+T` | New session |
 | `Ctrl+X` | Close the current session |
@@ -84,9 +85,10 @@ left on screen at exit so it stays in the terminal's own scrollback.
 
 ### Renaming a session
 
-A session names itself after its first message. To rename it, open the picker
-and press **`r`** on the highlighted session: the entry field turns into a
-title editor, pre-filled with the current title.
+A session names itself after its first message. To rename it, press **`Alt+R`**
+in the chat view — or type `/rename` — and the input line turns into a title
+editor, pre-filled with the current title. Typing `/rename Some title` renames
+it directly, without the editor.
 
 - **Enter** saves. **Esc** cancels and keeps the old title.
 - `←`/`→`, `Home`/`End`, `Backspace`, and the usual `Ctrl+A`/`Ctrl+E`/`Ctrl+W`
@@ -213,6 +215,7 @@ Slash commands are typed into the input and sent with Enter.
 | `/quit`, `/exit` | Exit `coda` and save sessions. Same as typing `quit` / `exit`, or `Ctrl+C` |
 | `/paste` | Attach the clipboard image (see [Images](#images)) |
 | `/image <path>` | Attach an image file (see [Images](#images)) |
+| `/rename <title>` | Rename the current session. With no title, opens the interactive title editor (same as `Alt+R`) |
 
 A line that begins with `/` but names no known command is **not** sent to the
 model. Instead `coda` reports `unknown command: …` in the transcript and leaves

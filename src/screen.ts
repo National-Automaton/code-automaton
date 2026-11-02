@@ -75,14 +75,12 @@ export interface RenderState {
     items: PickerItem[];
     index: number;
     query: string;
-    /** Title of the session awaiting delete confirmation, if any. */
-    confirmDelete: string | null;
-    /**
-     * Set while a session title is being edited: the session's current title
-     * (for the prompt) and the edit buffer with its caret.
-     */
-    rename: { title: string; value: string; cursor: number } | null;
   } | null;
+  /**
+   * Set while a session's title is being edited from the chat view (Alt+R).
+   * The input line is replaced by the title editor.
+   */
+  rename: { title: string; value: string; cursor: number } | null;
 }
 
 /** Strip ANSI from a string so we can measure display width. */
@@ -253,7 +251,7 @@ export class Screen {
     // list shrinks first (down to 0) to keep header + query + hint on screen.
     // Extra rows the wrapped query occupies beyond its first line, so a long
     // message does not push the list off the bottom.
-    const pickerFieldLen = s.picker ? (s.picker.rename?.value.length ?? s.picker.query.length) : 0;
+    const pickerFieldLen = s.picker ? s.picker.query.length : 0;
     const pickerQueryExtra = s.picker
       ? Math.max(0, Math.ceil(pickerFieldLen / Math.max(10, width - 3)) - 1)
       : 0;
@@ -311,7 +309,7 @@ export class Screen {
           "Sessions" +
           RESET +
           DIM +
-          (s.picker.rename ? " (editing title)" : " (↑/↓ to move, Enter to open)") +
+          " (↑/↓ to move, Enter to open)" +
           RESET
       );
 
@@ -366,50 +364,25 @@ export class Screen {
       // Typed text becomes the first message of a new session on Enter; it does
       // not filter the list. Wrapped hard so a long message cannot overrun the
       // width and push the rest of the frame down when the terminal soft-wraps.
-      // While renaming, the same field edits the session title instead.
-      const fieldValue = p.rename ? p.rename.value : p.query;
       const queryRowIdx = out.length;
-      const queryRows = wrapHard(fieldValue, Math.max(10, width - 3));
+      const queryRows = wrapHard(p.query, Math.max(10, width - 3));
       for (let i = 0; i < queryRows.length; i++) {
         out.push((i === 0 ? CYAN + "> " + RESET : "  ") + queryRows[i]);
       }
       // Hint rows are single lines, so each is clamped to the terminal width.
-      // An overlong hint (a long session title in the rename prompt, or a long
-      // delete-confirm title) soft-wraps onto a second line, which shifts every
-      // row below it -- including the entry field, whose cursor is placed by
+      // An overlong hint soft-wraps onto a second line, which shifts every row
+      // below it -- including the entry field, whose cursor is placed by
       // counting logical rows.
       const fit = (text: string): string => text.slice(0, Math.max(1, width - 1));
-      if (p.rename) {
-        out.push(
-          DIM +
-            fit(
-              `rename "${p.rename.title}" · Enter save · Esc cancel · empty resets to auto-title`
-            ) +
-            RESET
-        );
-      } else if (p.confirmDelete !== null) {
-        const label =
-          p.confirmDelete.length > 40 ? p.confirmDelete.slice(0, 37) + "..." : p.confirmDelete;
-        out.push(
-          RED +
-            BOLD +
-            `Delete "${label}"? ` +
-            RESET +
-            YELLOW +
-            fit("y to confirm · any other key cancels") +
-            RESET
-        );
-      } else {
-        out.push(
-          DIM +
-            fit(
-              "↑/↓ pick · Enter " +
-                (p.query ? "start new session" : "open session") +
-                " · d delete · r rename · Esc cancel"
-            ) +
-            RESET
-        );
-      }
+      out.push(
+        DIM +
+          fit(
+            "↑/↓ pick · Enter " +
+              (p.query ? "start new session" : "open session") +
+              " · type to start a new session"
+          ) +
+          RESET
+      );
 
       this.draw(out);
 
@@ -417,9 +390,7 @@ export class Screen {
       // Same end-of-row rule as the chat input: when the text exactly fills a
       // row the caret stays on that row rather than jumping to the next.
       const qWidth = Math.max(10, width - 3);
-      const qLen = p.rename
-        ? Math.max(0, Math.min(p.rename.cursor, p.rename.value.length))
-        : p.query.length;
+      const qLen = p.query.length;
       const qAtEnd = qLen > 0 && qLen % qWidth === 0;
       const qRow = qAtEnd ? qLen / qWidth - 1 : Math.floor(qLen / qWidth);
       const qCol = qAtEnd ? qWidth : qLen % qWidth;
@@ -428,14 +399,20 @@ export class Screen {
     }
 
     // ---- Chat input: wrapped, with a real cursor at the edit position ----
+    // While a title is being edited (Alt+R) the same line edits the title
+    // instead, so the caret accounting below serves both.
     out.push("");
     const inputWidth = Math.max(10, width - 3);
-    const wrapped = wrapHard(s.input, inputWidth);
+    const fieldText = s.rename ? s.rename.value : s.input;
+    const wrapped = wrapHard(fieldText, inputWidth);
     // Which visual row/col does the cursor land on? When the text exactly fills
     // a row the caret belongs at the end of that filled row, not at column 1 of
     // the next one (which would make it jump a line ahead of the text).
-    const clampedCursor = Math.max(0, Math.min(s.cursor, s.input.length));
-    const before = s.input.slice(0, clampedCursor);
+    const clampedCursor = Math.max(
+      0,
+      Math.min(s.rename ? s.rename.cursor : s.cursor, fieldText.length)
+    );
+    const before = fieldText.slice(0, clampedCursor);
     const atRowEnd = before.length > 0 && before.length % inputWidth === 0;
     const curRow = atRowEnd ? before.length / inputWidth - 1 : Math.floor(before.length / inputWidth);
     const curCol = atRowEnd ? inputWidth : before.length % inputWidth;
@@ -454,13 +431,15 @@ export class Screen {
     const statusTag =
       s.status === "thinking" ? YELLOW + "● thinking" + RESET : DIM + "○ idle" + RESET;
     const scrollHint = offset > 0 ? DIM + " · PgDn/End to return" + RESET : "";
-    out.push(
-      statusTag +
-        DIM +
-        "   ← sessions · ↑↓ scroll · Ctrl+T new · Ctrl+X close · Ctrl+C exit" +
-        RESET +
-        scrollHint
-    );
+    const hint = s.rename
+      ? "rename · Enter save · Esc cancel · empty resets to auto-title"
+      : "← sessions · ↑↓ scroll · Ctrl+T new · Ctrl+X close · Ctrl+C exit";
+    // The status line is a single row: an overlong hint (a long title in the
+    // rename prompt) would soft-wrap and shift the row the caret is placed on.
+    // `statusTag` is plain text here plus escape codes; ASCII only, so its raw
+    // length is a safe allowance. The 3 covers the gap after it.
+    const hintWidth = Math.max(1, width - 1 - statusTag.length - 3);
+    out.push(statusTag + DIM + "   " + hint.slice(0, hintWidth) + RESET + scrollHint);
 
     this.draw(out);
 

@@ -46,10 +46,9 @@ Keys:
   Ctrl+R          Open the session picker:
                     type + Enter  = start a new session with that message
                     ↑/↓ + Enter   = open the highlighted session
-                    d             = delete (asks y to confirm)
-                    r             = rename the highlighted session
   Ctrl+T          New session
   Ctrl+X          Close current session
+  Alt+R           Rename the current session
   Ctrl+C          Exit
 
 Commands (typed into the input, sent with Enter):
@@ -57,6 +56,8 @@ Commands (typed into the input, sent with Enter):
   /quit, /exit        Exit and save sessions (same as quit / exit, or Ctrl+C)
   /paste              Attach the image on the Windows clipboard (WSL)
   /image <path>       Attach an image file to your next message
+  /rename <title>     Rename the current session. Without a title, opens the
+                      interactive title editor (same as Alt+R).
 
   A line starting with "/" that is not one of these is reported as an
   unknown command instead of being sent to the model.
