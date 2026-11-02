@@ -53,7 +53,13 @@ Keys:
   Ctrl+C          Exit
 
 Commands (typed into the input, sent with Enter):
+  /help, /?           Show the command and key reference
   /quit, /exit        Exit and save sessions (same as quit / exit, or Ctrl+C)
+  /paste              Attach the image on the Windows clipboard (WSL)
+  /image <path>       Attach an image file to your next message
+
+  A line starting with "/" that is not one of these is reported as an
+  unknown command instead of being sent to the model.
 
 Environment (any OpenAI-compatible endpoint works):
   CODA_API_KEY        (required) API key. Also reads DEEPSEEK_API_KEY /

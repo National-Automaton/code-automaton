@@ -520,6 +520,41 @@ export class App {
     }
   }
 
+  /** Print the command reference into the transcript. */
+  private showHelp(): void {
+    this.systemNote(
+      [
+        "Commands:",
+        "  /help, /?           Show this list",
+        "  /quit, /exit        Exit and save sessions (same as quit / exit, or Ctrl+C)",
+        "  /paste              Attach the image on the Windows clipboard (WSL)",
+        "  /image <path>       Attach an image file to your next message",
+        "",
+        "Keys:",
+        "  Enter               Send the line (mid-turn, fold it into the running turn)",
+        "  ←                   Empty input: open session picker",
+        "  Ctrl+R              Open the session picker",
+        "  Ctrl+T / Ctrl+X     New session / close current session",
+        "  Ctrl+V              Attach a clipboard image (image-only clipboard)",
+        "  ↑ / ↓  PgUp / PgDn  Scroll transcript · End returns to the newest output",
+        "  Ctrl+C              Exit",
+      ].join("\n")
+    );
+  }
+
+  /**
+   * Report a line that starts with `/` but is not a known command. The text is
+   * left in the input so it can be corrected (or clear it with Esc) rather than
+   * being fired off to the model as a prompt.
+   */
+  private unknownCommand(text: string): void {
+    const name = text.split(/\s+/)[0];
+    this.systemNote(
+      `unknown command: ${name}   (type /help for the list)`
+    );
+    this.requestRender();
+  }
+
   /** Append a local, informational line to the current transcript. */
   private systemNote(text: string): void {
     this.current().entries.push({ role: "tool", name: "coda", ok: true, text });
@@ -586,12 +621,19 @@ export class App {
     // `/paste` pulls an image straight off the Windows clipboard. Windows
     // Terminal cannot hand image data to a program through the paste stream,
     // so the clipboard is read from the Windows side instead.
-    if (text === "/paste" || text === "/paste ") {
+    if (text === "/help" || text === "/?") {
+      this.input.clear();
+      this.showHelp();
+      return;
+    }
+    if (text === "/paste") {
       this.input.clear();
       void this.pasteFromClipboard();
       return;
     }
-    if (text.startsWith("/image")) {
+    // `/image <path>` — match the command word only, so `/imagefoo` is not
+    // swallowed as an `/image` command with argument "foo".
+    if (text === "/image" || text.startsWith("/image ")) {
       const arg = text.slice("/image".length).trim();
       this.input.clear();
       void this.attachImage(arg);
@@ -603,9 +645,18 @@ export class App {
     }
     // `/quit` and `/exit` are the slash-command spelling of the bare words
     // above. Matched exactly (no trailing space handled, since there is no
-    // argument) so a message beginning `/quit…` still reaches the model.
+    // argument).
     if (text === "/quit" || text === "/exit") {
       this.quit();
+      return;
+    }
+    // Any other line beginning with `/` is (almost certainly) a mistyped or
+    // unsupported command. Sending it to the model as a prompt is never what
+    // was intended, so report it and keep the text in the input for editing.
+    // A lone `/` is exempt: that is plausibly the start of a pasted absolute
+    // path or of text the user meant to send.
+    if (text.startsWith("/") && text.length > 1) {
+      this.unknownCommand(text);
       return;
     }
     const session = this.current();
