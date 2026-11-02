@@ -330,18 +330,26 @@ export class Screen {
         const active = p.items.length > 0 && i === p.index;
         // A row must never exceed `width`, or the terminal soft-wraps it onto a
         // second physical line. The cursor is then placed by counting logical
-        // rows, so it lands below the entry field it belongs to. That happened
-        // whenever `detail` was long ("12 msgs · thinking · <long date>") and at
-        // every terminal width, because only the label was ever truncated.
+        // rows, so it lands below the entry field it belongs to.
         //
         // Budget the row explicitly: prefix(2) + label + gap(1) + detail, capped
         // at width - 1 so a full row still cannot trigger auto-wrap.
+        //
+        // The label gets whatever the detail does not need, rather than the
+        // detail being fixed at a small width: a hard cap here cut the date off
+        // mid-string ("11/1/20…") at every terminal width, even when there was
+        // room to spare. Only a genuinely cramped row should truncate.
         const rowWidth = Math.max(10, width - 1);
-        const detailWidth = Math.max(0, Math.min(24, Math.floor(rowWidth / 2) - 3));
-        const labelWidth = Math.max(4, rowWidth - 2 - detailWidth - 1);
-        const label = `${item.label}`.padEnd(labelWidth).slice(0, labelWidth);
-        const detail = `${item.detail}`.slice(0, detailWidth);
         const prefix = active ? "▸ " : "  ";
+        const detailText = `${item.detail}`;
+        const labelText = `${item.label}`;
+        // Reserve at least a readable label; give detail the rest, up to its
+        // natural length, so a short detail leaves more room for the label.
+        const labelMin = Math.min(20, Math.floor(rowWidth / 3));
+        const detailWidth = Math.max(0, Math.min(detailText.length, rowWidth - 2 - labelMin - 1));
+        const labelWidth = Math.max(4, rowWidth - 2 - detailWidth - 1);
+        const label = labelText.padEnd(labelWidth).slice(0, labelWidth);
+        const detail = detailText.slice(0, detailWidth);
         const text = (prefix + label + " " + detail).slice(0, rowWidth);
         if (active) {
           out.push(REVERSE + text.padEnd(rowWidth) + RESET);
