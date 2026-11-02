@@ -13,8 +13,17 @@ name: Release
 #      this package. It does NOT need "bypass 2FA" -- staging is not gated on it.
 #   2. Settings -> Actions -> General -> Workflow permissions: allow read/write.
 #
-# To release: bump the version, commit, push, then push a matching tag.
-#   npm version patch && git push && git push origin v1.0.3
+# To release: bump the version, land the bump on main via PR, THEN push the tag.
+# main is protected, so a direct push is rejected -- and a tag pushed before the
+# bump is merged points at a commit that is not on the branch, so the staging
+# run and the branch disagree.
+#   npm version patch                     # commits + tags locally
+#   git switch -c chore/release-<ver> && git push -u origin chore/release-<ver>
+#   gh pr create --fill && gh pr merge --merge   # merge, do NOT squash
+#   git switch main && git pull --ff-only
+#   git push origin v<ver>                # tag's commit is now on main
+# Squashing the PR rewrites the commit the local tag points at, so a squash
+# merge would leave the tag on an orphaned commit. Use a merge commit.
 # CI stages it. Then approve the staged version in the npm web UI (account ->
 # Staged packages); that step is the 2FA proof-of-presence, so it stays manual.
 # Approving via CLI also works (`npm stage approve <stage-id>`) but is not
