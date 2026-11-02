@@ -240,9 +240,17 @@ export class Screen {
     const lines: string[] = [];
     for (const e of entries) {
       if (e.role === "user") {
-        for (const l of wrap(e.text, width - 2)) lines.push(BOLD + CYAN + "> " + l + RESET);
+        // width - 3, not width - 2: the "> " gutter is added after wrapping, so
+        // a width - 2 body plus the 2-column gutter would fill the last column
+        // exactly and trigger the pending-wrap shift (see the assistant branch).
+        for (const l of wrap(e.text, width - 3)) lines.push(BOLD + CYAN + "> " + l + RESET);
       } else if (e.role === "assistant") {
-        for (const l of wrap(e.text, width)) lines.push(l);
+        // Wrap to width - 1, not width. A row that exactly fills the last
+        // column leaves the terminal in its pending-wrap state, so the
+        // following "\r\n" wraps *and* newlines and every later row shifts down
+        // by one. Word-boundary breaks usually leave a row short, which is why
+        // this only showed up when a long word was split at the margin.
+        for (const l of wrap(e.text, width - 1)) lines.push(l);
       } else {
         const head =
           (e.ok === false ? RED : GREEN) +
@@ -250,7 +258,8 @@ export class Screen {
           RESET;
         lines.push(head);
         const body = e.text.length > 1200 ? e.text.slice(0, 1200) + " …" : e.text;
-        for (const l of wrap(body, width - 2)) lines.push(DIM + "  " + l + RESET);
+        // Same 2-column gutter as a user line, so wrap to width - 3.
+        for (const l of wrap(body, width - 3)) lines.push(DIM + "  " + l + RESET);
       }
       lines.push("");
     }
