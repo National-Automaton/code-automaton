@@ -19,6 +19,13 @@ export interface Config {
   visionModel: string;
   visionBaseURL: string;
   visionApiKey: string;
+  /**
+   * Whether to enable terminal mouse reporting. On (default) the wheel scrolls
+   * the transcript, but the terminal stops doing its own drag-to-select while
+   * coda runs (hold Shift to select). Off leaves drag-to-select alone and
+   * gives up the wheel, for users who would rather select with the mouse.
+   */
+  mouse: boolean;
 }
 
 /**
@@ -108,6 +115,12 @@ export function loadConfig(): Config {
   // existing behaviour for anyone who never attaches an image. Sending an image
   // to a model without vision silently returns nonsense, so this is checked in
   // agent.ts rather than assumed.
+  // Mouse reporting is on unless CODA_MOUSE is explicitly falsy. Only the
+  // unambiguously-off spellings disable it, so a typo keeps the default rather
+  // than silently turning the wheel off.
+  const mouseEnv = (env("CODA_MOUSE") ?? "").toLowerCase();
+  const mouse = !["0", "off", "false", "no", "none"].includes(mouseEnv);
+
   return {
     apiKey,
     baseURL,
@@ -115,5 +128,6 @@ export function loadConfig(): Config {
     visionModel: env("CODA_VISION_MODEL") ?? model,
     visionBaseURL: env("CODA_VISION_BASE_URL") ?? baseURL,
     visionApiKey: env("CODA_VISION_API_KEY") ?? apiKey,
+    mouse,
   };
 }

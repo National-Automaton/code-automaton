@@ -26,14 +26,16 @@ export class App {
   private rename: { id: string; buffer: LineBuffer } | null = null;
   /** Lines scrolled back from the tail of the transcript. */
   private scroll = 0;
-  private screen = new Screen();
+  private screen: Screen;
   private keys = new KeyReader();
   private quitting = false;
   /** Images attached with /image, waiting to ride along with the next message. */
   private pendingImages: AttachedImage[] = [];
   private renderQueued = false;
 
-  constructor(private config: Config) {}
+  constructor(private config: Config) {
+    this.screen = new Screen(config.mouse);
+  }
 
   async start(): Promise<void> {
     // History is loaded newest-first, but new sessions are appended -- so the

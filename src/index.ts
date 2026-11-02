@@ -69,6 +69,9 @@ Environment (any OpenAI-compatible endpoint works):
                       Also reads DEEPSEEK_BASE_URL / OPENAI_BASE_URL.
   CODA_MODEL          Model name (default: deepseek-chat)
   CODA_SESSIONS_DIR   Session storage (default: ~/.coda/sessions)
+  CODA_MOUSE          Mouse reporting (default: on). Set to "off" to leave the
+                      mouse to the terminal, so drag-to-select works without
+                      Shift; the wheel then scrolls the terminal, not coda.
 
 Images:
   /paste              Attach the image currently on the Windows clipboard
