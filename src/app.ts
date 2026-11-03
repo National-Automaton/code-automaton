@@ -15,7 +15,18 @@ import type { AttachedImage } from "./image.js";
  */
 export class App {
   private sessions: Session[] = [];
-  private active = 0;
+  /**
+   * Which session is active, held by **id** rather than by index.
+   *
+   * `sessions` is mutated underneath us -- a picker refresh appends records and
+   * drops ones deleted in another terminal, and the picker is drawn from a
+   * *sorted copy* of it. An index into that array therefore stops meaning what
+   * it did as soon as anything inserts, removes or reorders: the active session
+   * would silently become a different one. Holding the id instead makes the
+   * active session independent of array position, which is the property the
+   * picker actually needs.
+   */
+  private activeId: string | null = null;
   private input = new LineBuffer();
   /** Picker state: highlighted row and the "start a new session" field. */
   private picker: { index: number; query: LineBuffer } | null = null;
@@ -53,8 +64,9 @@ export class App {
     // away via the picker, which Esc returns from to this new session.
     const records = await loadAll();
     for (const rec of records) this.sessions.push(new Session(this.config, rec));
-    this.sessions.push(new Session(this.config));
-    this.active = this.sessions.length - 1;
+    const fresh = new Session(this.config);
+    this.sessions.push(fresh);
+    this.setActive(fresh);
     // Only the session this terminal starts on is locked. The rest are merely
     // listed; locking them would deny other terminals every saved session.
     this.claimActive();
@@ -85,7 +97,22 @@ export class App {
   }
 
   private current(): Session {
-    return this.sessions[this.active];
+    // Resolve by id, falling back only when the id is gone (the active session
+    // was deleted elsewhere): a stale id must never read past the end of the
+    // array, and the last session is the safest thing to show.
+    const found = this.sessions.find((s) => s.id === this.activeId);
+    if (found) return found;
+    const fallback = this.sessions[this.sessions.length - 1];
+    this.activeId = fallback?.id ?? null;
+    return fallback;
+  }
+
+  /**
+   * Make `session` the active one. Every place that used to assign an index
+   * calls this instead, so the id and the array position can never disagree.
+   */
+  private setActive(session: Session): void {
+    this.activeId = session.id;
   }
 
   /** Coalesce redraws so a fast stream doesn't block on I/O. */
@@ -99,7 +126,8 @@ export class App {
   }
 
   private render(): void {
-    const items: PickerItem[] = this.pickerSessions().map((s) => ({
+    const pickerList = this.pickerSessions();
+    const items: PickerItem[] = pickerList.map((s) => ({
       label: s.title,
       detail:
         `${s.entries.length} msgs · ${s.status === "thinking" ? "● thinking" : "idle"} · ` +
@@ -112,7 +140,13 @@ export class App {
       cursor: this.input.cursor,
       status: this.current().status,
       title: this.current().title,
-      sessionIndex: this.active,
+      // Report the session's position in the SAME order the picker lists, so
+      // the header's "session N" names the row the user actually picked. The
+      // active session is now held by id, so this lookup is stable regardless
+      // of how `sessions` has been reordered underneath; the index is only
+      // computed here, for display. `pickerSessions()` always contains the
+      // active session, so the fallback to row 1 is only a guard.
+      sessionIndex: Math.max(0, pickerList.findIndex((s) => s.id === this.activeId)),
       sessionCount: this.sessions.length,
       scrollOffset: this.scroll,
       picker: this.picker
@@ -462,7 +496,7 @@ export class App {
     const leaving = this.current();
     const session = new Session(this.config);
     this.sessions.push(session);
-    this.active = this.sessions.length - 1;
+    this.setActive(session);
     if (leaving) void leaving.release();
     this.claimActive();
     this.input.clear();
@@ -485,8 +519,12 @@ export class App {
         // stale timeout even though the session is gone from this terminal.
         void s.release();
         this.sessions.splice(i, 1);
-        if (this.active > i) this.active--;
-        else if (this.active === i) this.active = Math.max(0, this.active - 1);
+        // If that was the active session, `current()` would now be resolving a
+        // missing id. Point the id at the last remaining session; if none is
+        // left the caller is about to add one and set the id itself.
+        if (s.id === this.activeId) {
+          this.activeId = this.sessions[this.sessions.length - 1]?.id ?? null;
+        }
       }
     }
   }
@@ -523,22 +561,36 @@ export class App {
    * session that two processes would then fight over.
    */
   private async openSession(session: Session): Promise<boolean> {
-    if (session === this.current() && session.lockHeld) return true;
+    if (session === this.current() && session.lockHeld) {
+      return true;
+    }
+    // Switch to the session *before* awaiting the lock. The await yields to the
+    // event loop, and a refresh triggered by opening the picker can run in that
+    // gap and mutate `sessions`; leaving the active id set only afterwards meant
+    // the frame drawn in the meantime showed the old session. Setting it first
+    // makes the picked session the active one immediately, whatever the refresh
+    // does next -- and because it is an id, the refresh cannot invalidate it.
+    const leaving = this.current();
+    this.setActive(session);
+    this.input.clear();
+    this.scroll = 0;
+    this.requestRender();
+
     const res = await session.acquire();
     if (!res.ok) {
+      // Could not take the lock: put the user back where they were rather than
+      // leaving them in a session another terminal owns.
       this.systemNote(
         `session "${session.title}" is open in another terminal (${res.heldBy}); ` +
           `close it there, or wait for it to go stale`
       );
+      if (leaving) this.setActive(leaving);
+      this.requestRender();
       return false;
     }
     // Release the lock on the session we are leaving, now that we hold the new
-    // one. Done after acquiring so a failed switch leaves us where we were.
-    const leaving = this.current();
+    // one.
     if (leaving && leaving !== session) void leaving.release();
-    this.active = this.sessions.indexOf(session);
-    this.input.clear();
-    this.scroll = 0;
     return true;
   }
 
@@ -553,14 +605,17 @@ export class App {
     if (session.status === "thinking") return; // don't kill a running turn
     const idx = this.sessions.indexOf(session);
     if (idx === -1) return;
-    const wasActive = idx === this.active;
+    const wasActive = session.id === this.activeId;
     void session.delete(); // also releases its lock
     this.sessions.splice(idx, 1);
     if (this.sessions.length === 0) this.sessions.push(new Session(this.config));
-    if (this.active >= this.sessions.length) this.active = this.sessions.length - 1;
-    // Closing the session you were on makes some other session active; take its
-    // lock, or this terminal would be working in a session it does not hold.
-    if (wasActive) this.claimActive();
+    // Closing the session you were on makes another session active. Point the
+    // id at it (the array has shrunk, so an index would be meaningless) and take
+    // its lock, or this terminal would work in a session it does not hold.
+    if (wasActive) {
+      this.setActive(this.sessions[Math.min(idx, this.sessions.length - 1)]);
+      this.claimActive();
+    }
     this.clampPickerIndex(fromPicker);
   }
 
@@ -853,8 +908,10 @@ export class App {
       for (const s of dropped) void s.release();
       this.sessions = kept;
       // Keep the active session if it survived; otherwise fall back to the end.
-      const stillThere = this.sessions.findIndex((s) => s.id === activeIdBefore);
-      this.active = stillThere >= 0 ? stillThere : Math.max(0, this.sessions.length - 1);
+      const stillThere = this.sessions.some((s) => s.id === activeIdBefore);
+      if (!stillThere) {
+        this.setActive(this.sessions[this.sessions.length - 1]);
+      }
     }
 
     // Update existing sessions and add the ones we have not seen. A record is
@@ -890,8 +947,9 @@ export class App {
   private newSession(): void {
     this.pruneEmptySessions();
     const leaving = this.current();
-    this.sessions.push(new Session(this.config));
-    this.active = this.sessions.length - 1;
+    const fresh = new Session(this.config);
+    this.sessions.push(fresh);
+    this.setActive(fresh);
     if (leaving) void leaving.release();
     this.claimActive();
     this.input.clear();
