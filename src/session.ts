@@ -1,6 +1,7 @@
 import { Agent, AgentEvent } from "./agent.js";
 import type { AttachedImage } from "./image.js";
 import { Config } from "./config.js";
+import { SessionLock, acquireLock, describeHolder } from "./lock.js";
 import {
   DEFAULT_TITLE,
   Entry,
@@ -25,6 +26,13 @@ export class Session {
   createdAt: number;
   updatedAt: number;
   private agent: Agent;
+  /**
+   * The advisory lock this terminal holds on the session, once taken. Null
+   * until `acquire()` succeeds; a session only acquires when this terminal
+   * actually takes it over (see `App`), so a session merely present in the
+   * picker list does not lock it away from other terminals.
+   */
+  private lock: SessionLock | null = null;
 
   constructor(
     private config: Config,
@@ -37,6 +45,36 @@ export class Session {
     this.updatedAt = rec?.updatedAt ?? Date.now();
     this.title = rec?.title ?? DEFAULT_TITLE;
     this.agent = new Agent(config, rec?.messages);
+  }
+
+  /** True once this terminal holds the session's lock. */
+  get lockHeld(): boolean {
+    return this.lock !== null;
+  }
+
+  /**
+   * Take the session's lock so a second coda cannot open it at the same time.
+   * Idempotent: already holding it is success.
+   *
+   * Returns the holder's description when the lock is taken elsewhere, so the
+   * caller can say who has it. A stale lock (dead process, stopped heartbeat)
+   * is taken over rather than refused.
+   */
+  async acquire(): Promise<{ ok: true } | { ok: false; heldBy: string }> {
+    if (this.lock) return { ok: true };
+    const res = await acquireLock(this.id);
+    if (res.ok) {
+      this.lock = res.holder;
+      return { ok: true };
+    }
+    return { ok: false, heldBy: describeHolder(res.heldBy) };
+  }
+
+  /** Give up the lock, if this session still holds it. Safe to call twice. */
+  async release(): Promise<void> {
+    const l = this.lock;
+    this.lock = null;
+    if (l) await l.release();
   }
 
   /**
@@ -183,6 +221,10 @@ export class Session {
   }
 
   async delete(): Promise<void> {
+    // Drop the lock first: once the session file is gone the lock file would be
+    // orphaned, and a stale lock left behind would block a future session that
+    // happened to reuse the id (it should not, but be tidy).
+    await this.release();
     await remove(this.id);
   }
 }

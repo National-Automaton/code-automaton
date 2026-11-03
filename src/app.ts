@@ -55,6 +55,9 @@ export class App {
     for (const rec of records) this.sessions.push(new Session(this.config, rec));
     this.sessions.push(new Session(this.config));
     this.active = this.sessions.length - 1;
+    // Only the session this terminal starts on is locked. The rest are merely
+    // listed; locking them would deny other terminals every saved session.
+    this.claimActive();
 
     this.screen.start();
     this.keys.onKey((k) => this.onKey(k));
@@ -67,9 +70,11 @@ export class App {
     };
     const flushAndExit = () => {
       cleanup();
-      Promise.all(this.sessions.map((s) => s.persist().catch(() => {}))).finally(() =>
-        process.exit(0)
-      );
+      Promise.all(
+        this.sessions.map((s) =>
+          Promise.all([s.persist().catch(() => {}), s.release()]).catch(() => {})
+        )
+      ).finally(() => process.exit(0));
       setTimeout(() => process.exit(0), 500).unref();
     };
     process.once("SIGTERM", flushAndExit);
@@ -325,8 +330,19 @@ export class App {
           // Typed something => start a brand-new session with it.
           this.startNewSessionWith(text);
         } else if (n > 0) {
-          // Nothing typed => open the highlighted session.
-          this.openSession(items[p.index]);
+          // Nothing typed => open the highlighted session. A session locked by
+          // another terminal refuses the switch; keep the picker open so the
+          // note (and the list) stay visible and another row can be chosen.
+          const target = items[p.index];
+          this.picker = null;
+          void this.openSession(target).then((opened) => {
+            if (!opened) {
+              this.picker = { index: p.index, query: p.query };
+              this.requestRender();
+            }
+          });
+          this.requestRender();
+          return;
         }
         this.picker = null;
         this.requestRender();
@@ -415,9 +431,12 @@ export class App {
       return;
     }
     this.pruneEmptySessions();
+    const leaving = this.current();
     const session = new Session(this.config);
     this.sessions.push(session);
     this.active = this.sessions.length - 1;
+    if (leaving) void leaving.release();
+    this.claimActive();
     this.input.clear();
     this.scroll = 0;
     if (session.status === "idle") {
@@ -433,6 +452,10 @@ export class App {
     for (let i = this.sessions.length - 1; i >= 0; i--) {
       const s = this.sessions[i];
       if (s.entries.length === 0 && s.status === "idle") {
+        // An empty placeholder may still hold a lock (the startup session this
+        // terminal began on). Drop it, or the session id stays locked until the
+        // stale timeout even though the session is gone from this terminal.
+        void s.release();
         this.sessions.splice(i, 1);
         if (this.active > i) this.active--;
         else if (this.active === i) this.active = Math.max(0, this.active - 1);
@@ -440,10 +463,55 @@ export class App {
     }
   }
 
-  private openSession(session: Session): void {
+  /**
+   * Take the lock for the session that just became active, for the paths that
+   * switch directly rather than through `openSession` (startup, a new session).
+   *
+   * Best-effort: the caller has already made the session active, so a failure
+   * here cannot undo the switch. For a brand-new session this only fails on a
+   * UUID collision or a stale lock file, and the note explains which.
+   */
+  private claimActive(): void {
+    const s = this.current();
+    void s.acquire().then((res) => {
+      if (!res.ok) {
+        this.systemNote(
+          `session "${s.title}" is open in another terminal (${res.heldBy})`
+        );
+      }
+    });
+  }
+
+  /**
+   * Switch to `session`, taking its lock first.
+   *
+   * The lock is taken when a session becomes active, not when it is merely
+   * listed: a terminal that is only showing the picker should not lock every
+   * session away from other terminals. Switching away releases the lock on the
+   * session being left, so the same session can be opened elsewhere.
+   *
+   * If the target is locked by another live coda, refuse the switch and say who
+   * has it, leaving the user where they were rather than silently opening a
+   * session that two processes would then fight over.
+   */
+  private async openSession(session: Session): Promise<boolean> {
+    if (session === this.current() && session.lockHeld) return true;
+    const res = await session.acquire();
+    if (!res.ok) {
+      this.systemNote(
+        `session "${session.title}" is open in another terminal (${res.heldBy}); ` +
+          `close it there, or wait for it to go stale`
+      );
+      return false;
+    }
+    // Release the lock on the session we are leaving, now that we hold the new
+    // one. Done after acquiring so a failed switch leaves us where we were.
+    const leaving = this.current();
+    if (leaving && leaving !== session) void leaving.release();
     this.active = this.sessions.indexOf(session);
     this.input.clear();
     this.scroll = 0;
+    return true;
   }
 
   /**
@@ -457,10 +525,14 @@ export class App {
     if (session.status === "thinking") return; // don't kill a running turn
     const idx = this.sessions.indexOf(session);
     if (idx === -1) return;
-    void session.delete();
+    const wasActive = idx === this.active;
+    void session.delete(); // also releases its lock
     this.sessions.splice(idx, 1);
     if (this.sessions.length === 0) this.sessions.push(new Session(this.config));
     if (this.active >= this.sessions.length) this.active = this.sessions.length - 1;
+    // Closing the session you were on makes some other session active; take its
+    // lock, or this terminal would be working in a session it does not hold.
+    if (wasActive) this.claimActive();
     this.clampPickerIndex(fromPicker);
   }
 
@@ -707,9 +779,10 @@ export class App {
    *  - **Add** records we have never seen, so a session started elsewhere shows
    *    up.
    *
-   * Updates are last-writer-wins: two terminals driving the same session will
-   * overwrite each other. There is no locking yet, so this deliberately does
-   * the conservative thing and never touches a session mid-turn.
+   * Updates are last-writer-wins for two terminals that hold the same session
+   * without locking (a lock that was stolen after going stale). With the
+   * advisory lock in place a second terminal cannot open a session another one
+   * holds, so this path normally only sees sessions nobody is driving.
    */
   private async refreshSessionsFromDisk(): Promise<void> {
     let records: SessionRecord[];
@@ -738,6 +811,11 @@ export class App {
     );
     const removedCount = this.sessions.length - kept.length;
     if (removedCount > 0) {
+      // Sessions dropped here were deleted in another terminal, so they are no
+      // longer ours to hold: release any lock this terminal had on them rather
+      // than leaving the id locked until the stale timeout.
+      const dropped = this.sessions.filter((s) => !kept.includes(s));
+      for (const s of dropped) void s.release();
       this.sessions = kept;
       // Keep the active session if it survived; otherwise fall back to the end.
       const stillThere = this.sessions.findIndex((s) => s.id === activeIdBefore);
@@ -775,8 +853,11 @@ export class App {
 
   private newSession(): void {
     this.pruneEmptySessions();
+    const leaving = this.current();
     this.sessions.push(new Session(this.config));
     this.active = this.sessions.length - 1;
+    if (leaving) void leaving.release();
+    this.claimActive();
     this.input.clear();
     this.scroll = 0;
     this.requestRender();
@@ -913,11 +994,15 @@ export class App {
     this.quitting = true;
     this.screen.stop();
     this.keys.stop();
-    // Give any in-flight saves a moment to land before exiting.
-    Promise.all(this.sessions.map((s) => s.persist().catch(() => {}))).finally(() =>
-      process.exit(0)
-    );
-    // Safety net in case a save hangs.
+    // Give any in-flight saves a moment to land before exiting, and drop the
+    // locks we hold so the sessions can be opened in another terminal at once
+    // rather than waiting out the stale timeout.
+    Promise.all(
+      this.sessions.map((s) =>
+        Promise.all([s.persist().catch(() => {}), s.release()]).catch(() => {})
+      )
+    ).finally(() => process.exit(0));
+    // Safety net in case a save or release hangs.
     setTimeout(() => process.exit(0), 500).unref();
   }
 }

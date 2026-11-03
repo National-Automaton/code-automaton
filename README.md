@@ -69,6 +69,17 @@ renames and new messages are picked up, and sessions deleted elsewhere
 disappear. A session that is still running a turn in this terminal is left
 alone — its in-flight output has not been written yet, so it would be clobbered.
 
+A session you open is **locked** for as long as this terminal is on it, so a
+second terminal cannot open the same session and overwrite your work. The lock
+is advisory — a small `<id>.lock` file beside the session, refreshed with a
+heartbeat while `coda` runs — and is released when you switch away, close the
+session, or quit. By default `coda` will not open the session at all while
+another terminal holds it, and says which process does; that is the loss-proof
+default, since two writers to one session silently overwrite each other. A lock
+left by a terminal that crashed goes stale on its own (a dead process on the
+same machine, or a heartbeat older than 30 seconds across machines) and is
+taken over automatically.
+
 ### Scrolling back
 
 Long answers and tool output scroll past the visible window. `coda` keeps the
