@@ -220,6 +220,26 @@ export async function acquireLock(id: string): Promise<LockResult> {
   return { ok: false, heldBy: cur ?? { token: "", pid: 0, host: "", beat: 0 } };
 }
 
+/**
+ * Who holds this session's lock, without trying to take it.
+ *
+ * The picker needs this to say *before* the user presses Enter that a row is
+ * unavailable, and who has it -- the refusal message on its own was written to
+ * the transcript, which is not drawn while the picker is open, so a locked row
+ * looked like a dead keypress.
+ *
+ * Returns null when nobody holds it, or when the lock is stale: a lock whose
+ * holder has died (same host) or stopped beating (any host) would be stolen by
+ * `acquireLock`, so reporting it as held would be misleading -- the session can
+ * be opened.
+ */
+export async function lockHolder(id: string): Promise<string | null> {
+  const info = await readLock(id);
+  if (!info) return null;
+  if (isStale(info, Date.now())) return null;
+  return describeHolder(info);
+}
+
 /** Human-readable description of a lock holder, for the error message. */
 export function describeHolder(info: LockInfo): string {
   if (!info.token) return "another coda process";

@@ -58,6 +58,13 @@ const RED = ESC + "31m";
 export interface PickerItem {
   label: string;
   detail: string;
+  /**
+   * Who holds this session's lock, when another coda has it open. Shown on the
+   * row so a session that cannot be opened says so *before* it is chosen:
+   * the refusal used to go to the transcript, which the full-screen picker does
+   * not draw, so pressing Enter on a locked row looked like a dead keypress.
+   */
+  locked?: string | null;
 }
 
 export interface RenderState {
@@ -636,13 +643,14 @@ export class Screen {
     width: number,
     height: number
   ): void {
-    const fit = (text: string): string => text.slice(0, Math.max(1, width - 1));
     const rule = DIM + "─".repeat(Math.max(1, width - 1)) + RESET;
 
     // Entry field: first, so the list can be given whatever is left over. A
     // long message wraps rather than being cut.
     const queryWidth = Math.max(10, width - 3);
     const queryRows = wrapHard(p.query, queryWidth);
+    // The generic hint gains a locked-row note when there is one to explain:
+    // without it, "open in pid 841" reads as a fact with no remedy.
     const hint = p.renaming
       ? "rename · Enter save · Esc cancel · empty resets to auto-title"
       : "↑/↓ pick · Enter " +
@@ -676,6 +684,7 @@ export class Screen {
     const start = p.items.length === 0 ? 0 : this.pickerTop;
     const end = Math.min(start + listRows, p.items.length);
     let drawn = 0;
+    let lockedCount = 0;
     for (let i = start; i < end; i++) {
       const item = p.items[i];
       // Always show the highlight: the query does not filter the list, so
@@ -686,12 +695,27 @@ export class Screen {
       // detail cut dates off mid-string even when there was room to spare.
       const rowWidth = Math.max(10, width - 1);
       const labelMin = Math.min(20, Math.floor(rowWidth / 3));
-      const detailWidth = Math.max(0, Math.min(item.detail.length, rowWidth - 2 - labelMin - 1));
+      // A locked row says so in place of its detail: the message is the reason
+      // Enter will not work, so it is more useful than the message count. It is
+      // plain text, so it is measured the same way.
+      const detailText = item.locked
+        ? `open in ${item.locked} -- press Enter to retry`
+        : item.detail;
+      const detailWidth = Math.max(0, Math.min(detailText.length, rowWidth - 2 - labelMin - 1));
       const labelWidth = Math.max(4, rowWidth - 2 - detailWidth - 1);
       const label = item.label.padEnd(labelWidth).slice(0, labelWidth);
-      const detail = item.detail.slice(0, detailWidth);
+      const detail = detailText.slice(0, detailWidth);
       const text = ((active ? "▸ " : "  ") + label + " " + detail).slice(0, rowWidth);
-      out.push(active ? REVERSE + text.padEnd(rowWidth) + RESET : "  " + label + " " + DIM + detail + RESET);
+      if (active) {
+        out.push(REVERSE + text.padEnd(rowWidth) + RESET);
+      } else if (item.locked) {
+        // Locked rows are dimmed in the message colour rather than the normal
+        // detail colour, so an unavailable session is visible at a glance.
+        out.push("  " + label + " " + YELLOW + detail + RESET);
+      } else {
+        out.push("  " + label + " " + DIM + detail + RESET);
+      }
+      if (item.locked) lockedCount++;
       drawn++;
     }
     if (p.items.length === 0 && listRows > 0) {
@@ -708,7 +732,31 @@ export class Screen {
       out.push((i === 0 ? CYAN + "> " + RESET : "  ") + queryRows[i]);
     }
     out.push(rule);
-    out.push(DIM + fit(hint) + RESET);
+    // The hint row carries a note when some listed session is locked, so the
+    // markers on the rows have an explanation and a remedy next to them without
+    // spending an extra line: a locked session can be opened as soon as the
+    // coda holding it exits or stops beating (its lock then goes stale and is
+    // taken over on the next Enter).
+    // The note is reserved *before* the hint is clamped, so on a narrow
+    // terminal the hint gives way rather than the note being cut to a stray
+    // separator. Budget: width - 1 for the row, minus the note and its gap.
+    const lockNote =
+      lockedCount > 0
+        ? `   ·   ${lockedCount === 1 ? "1 session is" : `${lockedCount} sessions are`} ` +
+          `open in another coda (wait ~30s)`
+        : "";
+    // The note gets what it needs first (it is the new information; the hint is
+    // standing text), capped so the hint always keeps a readable stub. Without
+    // the cap an 80-column terminal would spend the whole row on the note.
+    const room = Math.max(1, width - 1);
+    const noteRoom = lockNote ? Math.min(lockNote.length, Math.max(0, room - 24)) : 0;
+    const hintRoom = Math.max(1, room - noteRoom);
+    out.push(
+      DIM +
+        hint.slice(0, hintRoom) +
+        RESET +
+        (noteRoom > 0 ? YELLOW + lockNote.slice(0, noteRoom) + RESET : "")
+    );
 
     this.draw(out);
 
