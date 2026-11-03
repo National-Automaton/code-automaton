@@ -4,6 +4,7 @@ import { LineBuffer } from "./linebuffer.js";
 import { Screen, PickerItem } from "./screen.js";
 import { Session } from "./session.js";
 import { loadAll } from "./store.js";
+import type { SessionRecord } from "./store.js";
 import { attachImage, clipboardContents, clipboardImagePath, ImageError } from "./image.js";
 import type { AttachedImage } from "./image.js";
 
@@ -683,6 +684,92 @@ export class App {
       index: Math.max(0, idx),
       query: new LineBuffer(),
     };
+    this.requestRender();
+    // Pull in changes made by other terminals. The picker is already on screen
+    // with the list we have, so the refresh lands as a second frame rather than
+    // making the key feel slow on a large sessions directory.
+    void this.refreshSessionsFromDisk();
+  }
+
+  /**
+   * Reconcile the in-memory session list with the sessions directory, so work
+   * done in another terminal -- a new session, a rename, a deleted session --
+   * is reflected in the picker.
+   *
+   * Three things happen, all by session id:
+   *
+   *  - **Drop** sessions whose file is gone (deleted in another terminal). A
+   *    session that is still `thinking` here is kept: its turn owns the
+   *    transcript and will persist on completion, which re-creates the file.
+   *  - **Update** idle sessions whose on-disk record is newer than the copy in
+   *    memory (renamed or advanced elsewhere). A running session is left alone
+   *    for the same reason as above.
+   *  - **Add** records we have never seen, so a session started elsewhere shows
+   *    up.
+   *
+   * Updates are last-writer-wins: two terminals driving the same session will
+   * overwrite each other. There is no locking yet, so this deliberately does
+   * the conservative thing and never touches a session mid-turn.
+   */
+  private async refreshSessionsFromDisk(): Promise<void> {
+    let records: SessionRecord[];
+    try {
+      records = await loadAll();
+    } catch {
+      return; // unreadable directory: keep the list we have
+    }
+
+    const byId = new Map(this.sessions.map((s) => [s.id, s]));
+    const onDisk = new Set(records.map((r) => r.id));
+
+    // Remember what the user is looking at *by id*, not by index. Rows are
+    // about to appear and disappear, so an index remembered across the
+    // reconcile would land on whichever session happens to inherit that row
+    // number -- for the picker highlight that meant the selection silently
+    // jumping to a different session after a refresh.
+    const activeIdBefore = this.current()?.id;
+    const highlightedIdBefore = this.picker ? this.sessions[this.picker.index]?.id : undefined;
+
+    // Drop sessions that vanished from disk, keeping any that are mid-turn.
+    // pruneEmptySessions keeps placeholders that have no file at all, so those
+    // (never persisted, so never in `onDisk`) must survive too.
+    const kept = this.sessions.filter(
+      (s) => onDisk.has(s.id) || s.status === "thinking" || s.entries.length === 0
+    );
+    const removedCount = this.sessions.length - kept.length;
+    if (removedCount > 0) {
+      this.sessions = kept;
+      // Keep the active session if it survived; otherwise fall back to the end.
+      const stillThere = this.sessions.findIndex((s) => s.id === activeIdBefore);
+      this.active = stillThere >= 0 ? stillThere : Math.max(0, this.sessions.length - 1);
+    }
+
+    // Update existing sessions and add the ones we have not seen. A record is
+    // newer only if its updatedAt moved forward; equal stamps mean nothing
+    // changed, and an older stamp means our copy is ahead (we have not written
+    // it yet), so neither is adopted.
+    for (const rec of records) {
+      const existing = byId.get(rec.id);
+      if (existing) {
+        if (existing.status === "idle" && rec.updatedAt > existing.updatedAt) {
+          existing.adopt(rec);
+        }
+      } else {
+        this.sessions.push(new Session(this.config, rec));
+      }
+    }
+
+    // A refresh can shrink or grow the list under the picker. Re-anchor the
+    // highlight to the same session it was on (now at a new row), and only
+    // fall back to clamping when that session was itself removed.
+    if (this.picker) {
+      const p = this.picker;
+      const moved = highlightedIdBefore
+        ? this.sessions.findIndex((s) => s.id === highlightedIdBefore)
+        : -1;
+      if (moved >= 0) p.index = moved;
+      this.clampPickerIndex();
+    }
     this.requestRender();
   }
 

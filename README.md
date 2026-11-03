@@ -63,6 +63,12 @@ typing.
 Sessions are saved as JSON in `~/.coda/sessions/` (mode `600`) and reloaded the
 next time you start `coda`.
 
+Opening the picker re-reads that directory, so sessions started, renamed or
+deleted in **another terminal** show up here too: new sessions are added,
+renames and new messages are picked up, and sessions deleted elsewhere
+disappear. A session that is still running a turn in this terminal is left
+alone — its in-flight output has not been written yet, so it would be clobbered.
+
 ### Scrolling back
 
 Long answers and tool output scroll past the visible window. `coda` keeps the

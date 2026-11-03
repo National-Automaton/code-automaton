@@ -132,6 +132,26 @@ export class Session {
     }
   }
 
+  /**
+   * Take on the state of a record read from disk, so a change made in another
+   * terminal (a rename, another turn) shows up here too.
+   *
+   * Only the fields a refresh should follow are adopted -- title, transcript,
+   * updatedAt and the agent's history. `createdAt` and `cwd` stay put: they
+   * describe where this session began and moving them would make an older
+   * record look newer than it is.
+   *
+   * The caller is responsible for not calling this on a running session; a
+   * turn in flight owns `entries` and `messages` and adopting over it would
+   * drop the output it has not persisted yet.
+   */
+  adopt(rec: SessionRecord): void {
+    this.title = rec.title;
+    this.entries = rec.entries;
+    this.updatedAt = rec.updatedAt;
+    this.agent.messages = rec.messages;
+  }
+
   toRecord(): SessionRecord {
     return {
       id: this.id,
