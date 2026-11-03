@@ -209,17 +209,20 @@ export class Screen {
    * against the fallback -- leaving the transcript unable to scroll back.
    */
   viewportRowsForInput(input: string): number {
-    return this.viewportRowsFor(input, this.cols);
+    return this.viewportRowsFor(input, this.cols, this.rows);
   }
 
   /**
    * Transcript rows for this frame. Shrinks as the input wraps so the frame
-   * never exceeds the terminal height: header(1) + blank(1) + transcript +
+   * never exceeds the height budget: header(1) + blank(1) + transcript +
    * blank(1) + input(N) + status(1).
+   *
+   * `rows` is the frame budget, which is the terminal height unless a caller
+   * asks for less.
    */
-  private viewportRowsFor(input: string, width: number): number {
+  private viewportRowsFor(input: string, width: number, rows = this.rows): number {
     const chrome = 4 + this.inputRows(input, width);
-    return Math.max(1, this.rows - chrome);
+    return Math.max(1, rows - chrome);
   }
 
   /**
@@ -261,7 +264,20 @@ export class Screen {
    * (a shrinking status, a deleted character) leaves the old tail visible.
    */
   private draw(lines: string[]): void {
-    stdout.write(HOME + lines.map((l) => l + ERASE_LINE).join("\r\n"));
+    // Pad with a blank row for the reserved bottom line. `render()` budgets one
+    // row less than the terminal and never writes that last row, but the
+    // *previous* frame's content is still there, so it has to be erased: a
+    // frame that simply stopped short left a stale status line visible below
+    // the new one.
+    const painted = lines.length < this.rows ? [...lines, ""] : lines;
+    // Newlines only separate rows -- no trailing "\r\n" after the last one,
+    // which would scroll the viewport on the bottom row.
+    const payload = HOME + painted.map((l) => l + ERASE_LINE).join("\r\n");
+    stdout.write(payload);
+    // Park the cursor on the top row rather than leaving it on the last one:
+    // a cursor on the bottom row is in the terminal's pending-wrap state, and
+    // the next write there scrolls the screen.
+    stdout.write(ESC + "1;1H");
   }
 
   /** Build the display lines for the transcript, styling roles. */
@@ -297,7 +313,19 @@ export class Screen {
 
   render(s: RenderState): void {
     const width = this.cols;
-    const height = this.rows;
+    /**
+     * Height budget for the layout: every row except the last.
+     *
+     * The bottom row of the terminal is reserved and never written to. Writing
+     * it -- or leaving the cursor on it -- makes some terminals scroll the view
+     * by one line, which silently pushes row 0 (the header) into scrollback:
+     * the header is composed and sent correctly but never seen. Reserving the
+     * row keeps every frame clear of that edge.
+     *
+     * `draw()` still paints that reserved row, blank, so the previous frame's
+     * last line cannot survive underneath this one.
+     */
+    const height = Math.max(1, this.rows - 1);
     // The picker overlays its own chrome (separator, title, query, list and
     // hint), so it gets a much smaller transcript budget than the chat view;
     // otherwise the frame overflows and the query line scrolls off-screen.
@@ -317,7 +345,7 @@ export class Screen {
     const pickerChrome = s.picker ? 6 + pickerListHeight + pickerQueryExtra : 0;
     const viewport = s.picker
       ? Math.max(0, height - 2 - pickerChrome)
-      : this.viewportRowsFor(s.input, width);
+      : this.viewportRowsFor(s.input, width, height);
 
     const all = this.styledEntries(s.entries, width);
     this.lastTotalLines = all.length;
