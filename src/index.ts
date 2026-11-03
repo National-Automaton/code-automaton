@@ -75,6 +75,10 @@ Environment (any OpenAI-compatible endpoint works):
   CODA_MOUSE          Mouse reporting (default: on). Set to "off" to leave the
                       mouse to the terminal, so drag-to-select works without
                       Shift; the wheel then scrolls the terminal, not coda.
+  CODA_PARALLEL_TOOLS Tool calls (default: on). When the model requests several
+                      independent read-only tools at once, they run
+                      concurrently; anything that writes a file still runs in
+                      order. Set to "off" for strict request order.
 
 Images:
   /paste              Attach the image currently on the Windows clipboard

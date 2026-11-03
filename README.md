@@ -30,6 +30,13 @@ letter is a shortcut, so a message can start with any character. Delete and
 rename are the modifier chords `Ctrl+X` and `Alt+R`, so they never collide with
 typing.
 
+The picker takes over the whole terminal rather than sitting under the current
+conversation, so the list gets every row the terminal has and nothing from the
+previous session is left on screen to be misread as part of it.
+
+The header line reads `Code Automaton <version>` in bold, followed by the
+current session's position and title.
+
 | Key | Action |
 | --- | --- |
 | `Enter` | Send the current line — or, mid-turn, fold it into the running turn |
@@ -98,6 +105,35 @@ The header shows `▲ scrolled back N` while you are reading history. Scrolling 
 independent of streaming: a reply that is still arriving keeps appending at the
 tail without yanking you back down, so you can read earlier output while the
 model is still writing.
+
+### Status line
+
+The line under the input shows `○ idle` or `● thinking`, and how many tools are
+in use — the session counts as one of them, and a single call is the session's own
+work, so it does not raise the number:
+
+| Situation | Status line |
+| --- | --- |
+| Session open, nothing else running | `○ idle · 1 tool` |
+| One call in flight | `● thinking · 1 tool` |
+| Two calls in flight at once | `● thinking · 2 tools` |
+| A five-call batch that just finished | `● thinking · 5 tools` |
+
+So the number rises only when several calls are in use **concurrently** (see
+[Parallel tool calls](#parallel-tool-calls)), never past 1 for ordinary
+one-at-a-time work.
+
+A count above 1 **lingers** for about a second and a half after the calls
+finish, rather than only appearing while they are actually running. Two reasons: a
+fast command completes in a few milliseconds — too quick to be on screen when the
+frame is drawn — and a sequence of calls is idle in the gaps between them, so a
+strictly live count would blink up and down. It uses the peak for the run, so a
+batch of five reads `5 tools` even if it finished between two frames. After the
+linger expires it falls back to `1 tool` while the session stays open. While you
+are scrolled back the line also shows `PgDn/End to return`.
+
+The keyboard hints that used to sit here have moved to `/help` and the key table
+above.
 
 `coda` enables terminal mouse reporting (SGR, `1000`+`1006`) while it runs, so
 the wheel scrolls *its* transcript — the whole session, not just what happens to
@@ -248,6 +284,21 @@ Windows side via PowerShell. On macOS/Linux use `/image <path>`.
 - `list_dir` — list a directory
 - `bash` — run a shell command
 
+### Parallel tool calls
+
+When the model asks for several tools in one response, the read-only ones run
+concurrently instead of one after another — asking for five files takes about as
+long as reading the slowest one, not the sum of all five. In the transcript the
+tools still appear in the order the model requested them, and their results are
+shown in that same order, so the transcript never interleaves.
+
+Calls that write (`write_file`, `edit_file`) always run in order, and a batch
+stops at the first such call: concurrent writers to one file would clobber each
+other's read-modify-write. `bash` is treated as read-only, because deciding
+whether an arbitrary command writes would mean parsing shell syntax and getting
+it wrong occasionally — if you would rather have strict request order, set
+`CODA_PARALLEL_TOOLS=off`.
+
 ## Commands
 
 Slash commands are typed into the input and sent with Enter.
@@ -275,6 +326,7 @@ own is exempt and is sent as ordinary text (e.g. a pasted absolute path).
 | `CODA_MODEL` | `deepseek-chat` (also reads `DEEPSEEK_MODEL` / `OPENAI_MODEL`) |
 | `CODA_SESSIONS_DIR` | `~/.coda/sessions` (also reads the older `DSC_SESSIONS_DIR`) |
 | `CODA_MOUSE` | `on` — set to `off` to leave mouse selection to the terminal (see [Scrolling back](#scrolling-back)) |
+| `CODA_PARALLEL_TOOLS` | `on` — set to `off` to run tool calls strictly in the order the model requested them (see [Parallel tool calls](#parallel-tool-calls)) |
 | `CODA_VISION_MODEL` | the value of `CODA_MODEL` |
 | `CODA_VISION_BASE_URL` | the value of `CODA_BASE_URL` |
 | `CODA_VISION_API_KEY` | the value of `CODA_API_KEY` |

@@ -26,6 +26,13 @@ export interface Config {
    * gives up the wheel, for users who would rather select with the mouse.
    */
   mouse: boolean;
+  /**
+   * Whether independent read-only tool calls in one model response run
+   * concurrently (default). When false every call runs in request order, which
+   * is slower but gives strictly sequential semantics -- useful if a project's
+   * shell commands assume they are the only thing running.
+   */
+  parallelTools: boolean;
 }
 
 /**
@@ -121,6 +128,11 @@ export function loadConfig(): Config {
   const mouseEnv = (env("CODA_MOUSE") ?? "").toLowerCase();
   const mouse = !["0", "off", "false", "no", "none"].includes(mouseEnv);
 
+  // Parallel tool calls are on unless CODA_PARALLEL_TOOLS says otherwise. Same
+  // spellings as CODA_MOUSE, so one rule covers both.
+  const parallelEnv = (env("CODA_PARALLEL_TOOLS") ?? "").toLowerCase();
+  const parallelTools = !["0", "off", "false", "no", "none"].includes(parallelEnv);
+
   return {
     apiKey,
     baseURL,
@@ -129,5 +141,6 @@ export function loadConfig(): Config {
     visionBaseURL: env("CODA_VISION_BASE_URL") ?? baseURL,
     visionApiKey: env("CODA_VISION_API_KEY") ?? apiKey,
     mouse,
+    parallelTools,
   };
 }

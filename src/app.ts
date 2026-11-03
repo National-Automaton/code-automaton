@@ -7,6 +7,27 @@ import { loadAll } from "./store.js";
 import type { SessionRecord } from "./store.js";
 import { attachImage, clipboardContents, clipboardImagePath, ImageError } from "./image.js";
 import type { AttachedImage } from "./image.js";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * package.json's version, for the header. Read here rather than hardcoded so
+ * `npm version` is still the only place it changes; dist/app.js sits one level
+ * under the package root in both a clone and a global install.
+ */
+function readVersion(): string {
+  try {
+    const pkgPath = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "package.json"
+    );
+    return JSON.parse(fs.readFileSync(pkgPath, "utf8")).version as string;
+  } catch {
+    return "";
+  }
+}
 
 /**
  * Owns the whole TUI: the list of live sessions, which one is active, and the
@@ -53,7 +74,9 @@ export class App {
   private renderQueued = false;
 
   constructor(private config: Config) {
-    this.screen = new Screen(config.mouse);
+    // The version shown in the header comes from package.json, so `npm version`
+    // remains the single place it is set (index.ts reads it for --version).
+    this.screen = new Screen(config.mouse, readVersion());
   }
 
   async start(): Promise<void> {
@@ -139,6 +162,9 @@ export class App {
       input: this.input.value,
       cursor: this.input.cursor,
       status: this.current().status,
+      runningTools: this.current().runningTools,
+      toolSeq: this.current().toolActivitySeq,
+      toolPeak: this.current().toolPeak,
       title: this.current().title,
       // Report the session's position in the SAME order the picker lists, so
       // the header's "session N" names the row the user actually picked. The

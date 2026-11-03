@@ -23,6 +23,39 @@ export class Session {
   readonly cwd: string;
   entries: Entry[];
   status: "idle" | "thinking" = "idle";
+  /**
+   * Tool calls currently in flight, for the status bar.
+   *
+   * Delegated to the agent rather than counted from this session's own events:
+   * a turn that started before the user switched to this session emits into
+   * *that* view, so a local counter would sit at 0 while tools were plainly
+   * running. A single response can ask for several tools at once, and
+   * read-only ones run concurrently (see `runToolCalls`), so this is a count
+   * rather than a flag.
+   */
+  get runningTools(): number {
+    return this.agent.runningTools;
+  }
+
+  /**
+   * Bumped whenever this session's tool count changes -- a call starts or
+   * finishes.
+   *
+   * The status bar keeps the last tool count on screen for a moment after the
+   * calls finish (see `Screen.stickyToolCount`). That number must be discarded
+   * the moment new work starts, or the next run's first frame would show the
+   * previous run's count. Comparing this id is how the screen tells "quiet"
+   * from "stale": consecutive tools sit idle for a few milliseconds between
+   * calls, and that gap must not clear the display.
+   */
+  get toolActivitySeq(): number {
+    return this.agent.toolSeq;
+  }
+
+  /** Most tool calls in flight at once during the current run; see `Agent.toolPeak`. */
+  get toolPeak(): number {
+    return this.agent.toolPeak;
+  }
   createdAt: number;
   updatedAt: number;
   private agent: Agent;

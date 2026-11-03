@@ -42,8 +42,19 @@ but that should be rare.
 ## Before you push
 
 ```sh
-npm run build     # type-checks and compiles
+npm run typecheck   # type-checks src/ and test/
+npm run build       # compiles to dist/
+npm test            # renderer frame invariants
 ```
+
+`npm test` runs `test/screen.test.ts` with `tsx` (no build needed). It captures
+the bytes `Screen.render` writes and asserts the frame invariants — one paint per
+frame, the frame fits the terminal, no row reaches the last column, and the caret
+lands on the input row. Cases always walk chat → picker → chat, because the
+interesting bugs live in the transitions, not in either frame on its own.
+
+`tsconfig.test.json` exists so the tests are type-checked without being pulled
+into the published build (`tsconfig.json` only includes `src/`).
 
 ## Releasing
 

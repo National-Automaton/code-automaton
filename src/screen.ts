@@ -5,6 +5,13 @@
 import { stdout } from "node:process";
 import { Entry } from "./store.js";
 
+/**
+ * How long the last tool count stays on the status line after the tools
+ * finish. Long enough for a frame to be drawn and read; short enough that it
+ * does not still be showing when the next turn starts.
+ */
+const TOOL_COUNT_LINGER_MS = 1500;
+
 const ESC = "\x1b[";
 const CLEAR = ESC + "2J" + ESC + "H";
 /**
@@ -62,6 +69,38 @@ export interface RenderState {
   cursor: number;
   /** Status line, e.g. "idle" / "thinking". */
   status: string;
+  /**
+   * Tool calls currently running in this session, not counting the session
+   * itself. 0 when idle.
+   *
+   * The status line reports tools in use, counting the session: 1 while the
+   * session alone works (including when a single call runs alongside it -- that
+   * is the session's own work), rising only when several calls are in use at
+   * once. So two calls in flight reads "2 tools", not "3".
+   *
+   * The number is sticky -- it stays on screen for `TOOL_COUNT_LINGER_MS` after
+   * the calls finish -- because a fast call can complete in a few milliseconds,
+   * between two frames, and a sequential run is idle in the gaps between calls.
+   * See `stickyToolCount`.
+   */
+  runningTools: number;
+  /**
+   * Changes whenever `runningTools` does (see `Agent.toolSeq`). A different
+   * value means new activity, which replaces the sticky count immediately
+   * rather than letting the previous run's number linger over it.
+   */
+  toolSeq: number;
+  /**
+   * The highest count seen during the current run of activity, i.e. how many
+   * calls this run has had in flight at once (again excluding the session).
+   *
+   * Needed because rendering is frame-based: a whole batch can start and finish
+   * between two frames, so the screen never samples `runningTools` while it is
+   * non-zero. The agent tracks the peak, and the lingering count shows that --
+   * otherwise a five-call batch that ran fast would linger as whatever the
+   * previous run's count happened to be.
+   */
+  toolPeak: number;
   /** Session title shown in header. */
   title: string;
   /** Number of sessions and index of active one. */
@@ -73,9 +112,9 @@ export interface RenderState {
    */
   scrollOffset: number;
   /**
-   * When set, the picker overlay is shown instead of the input line.
-   * `query` is the typed text; when non-empty, Enter starts a new session
-   * using it. It does not filter the list.
+   * When set, the session picker is shown full-screen: the transcript and the
+   * input line are not drawn at all. `query` is the typed text; when non-empty,
+   * Enter starts a new session using it. It does not filter the list.
    */
   picker: {
     items: PickerItem[];
@@ -95,6 +134,16 @@ export interface RenderState {
    * The input line is replaced by the title editor.
    */
   rename: { title: string; value: string; cursor: number } | null;
+}
+
+/**
+ * "1 tool" / "5 tools" for the status line.
+ *
+ * Exported for the tests: the singular case is easy to get wrong and easy to
+ * miss by eye, since a single tool call is the common one.
+ */
+export function toolCount(n: number): string {
+  return `${n} ${n === 1 ? "tool" : "tools"}`;
 }
 
 /** Strip ANSI from a string so we can measure display width. */
@@ -151,6 +200,16 @@ export class Screen {
    * until you actually reach the edge.
    */
   private pickerTop = 0;
+  /**
+   * The last non-zero tool count, and when it stopped being current.
+   *
+   * Kept so the status line can show "· 1 tool" for a moment after the call
+   * finished; without it the count was only visible while a call was actually
+   * in flight, which for anything fast is a few milliseconds. `seq` ties the
+   * remembered count to the activity that produced it, so a new run replaces
+   * it at once instead of showing a stale number under a fresh status.
+   */
+  private stickyTools = { count: 0, seq: -1, since: 0 };
   private resizeHandler = () => {
     this.cols = stdout.columns || 80;
     this.rows = stdout.rows || 24;
@@ -230,8 +289,11 @@ export class Screen {
    * the wheel is left to the terminal (which keeps drag-to-select working) and
    * coda simply never receives wheel events -- the Up/Down/PgUp/PgDn keys still
    * scroll the transcript.
+   *
+   * `version` is shown after the brand in the header. It is passed in rather
+   * than read from package.json here so the renderer stays free of file I/O.
    */
-  constructor(private mouse = true) {}
+  constructor(private mouse = true, private version = "") {}
 
   /**
    * Forget the picker's scroll position so the next frame starts at the top.
@@ -240,6 +302,35 @@ export class Screen {
    */
   resetPickerWindow(): void {
     this.pickerTop = 0;
+  }
+
+  /**
+   * The branded header row: brand (bold) + version (bold) + dim detail, e.g.
+   * ` Code Automaton 1.6.2  session 1/3 · title`.
+   *
+   * Built here so the chat view and the full-screen picker share one wordmark.
+   * The detail is truncated to what is left, because a header row that fills
+   * the last column triggers the terminal's pending-wrap state and shifts the
+   * whole frame down one row (see `render`).
+   */
+  private headerLine(width: number, detail: string, reserve = 0): string {
+    const room = Math.max(0, width - 1 - reserve);
+    // The brand is fixed text, so on a narrow terminal it has to give way: a
+    // row wider than the terminal soft-wraps, which pushes every row below it
+    // down and (on the bottom row) scrolls the frame. Shed detail first, then
+    // the version, and only ever truncate the wordmark itself as a last resort.
+    const versionText = this.version ? ` ${this.version} ` : "";
+    const fullBrand = ` Code Automaton `;
+    const brand =
+      fullBrand.length + versionText.length <= room
+        ? fullBrand + versionText
+        : fullBrand.slice(0, Math.max(0, room - versionText.length));
+    const bodyRoom = Math.max(0, room - brand.length);
+    let body = detail;
+    if (body.length > bodyRoom) {
+      body = bodyRoom >= 2 ? body.slice(0, bodyRoom - 1) + "…" : body.slice(0, bodyRoom);
+    }
+    return BOLD + brand + RESET + DIM + body + RESET;
   }
 
   start(): void {
@@ -311,6 +402,56 @@ export class Screen {
     return lines;
   }
 
+  /**
+   * The tool count to show on the status line: live while calls are running,
+   * and for `TOOL_COUNT_LINGER_MS` afterwards.
+   *
+   * Two reasons it lingers rather than tracking the live count exactly:
+   *
+   *  - A fast tool is invisible otherwise. `bash` on a trivial command runs in
+   *    a few milliseconds, so a count that only showed while `runningTools > 0`
+   *    would usually fall between two frames and never be seen at all.
+   *  - A sequential run is idle *between* calls. Three tools in a row are
+   *    separated by gaps where the count is genuinely 0; flickering off in each
+   *    gap reads as three separate blips rather than one run of three.
+   *
+   * A new run replaces the remembered count immediately: `seq` changes when the
+   * live count does, so the first frame of the next run shows its own count
+   * rather than the previous one.
+   *
+   * Holding the value increases the idle window by `TOOL_COUNT_LINGER_MS`. That
+   * includes the window after the turn ends, which is why the count can remain
+   * visible next to an `○ idle` status for a moment -- there really is nothing
+   * running at that point, and the line is saying "this is what just ran".
+   */
+  private stickyToolCount(running: number, seq: number, peak: number): number {
+    const now = Date.now();
+
+    // `running`/`peak` are *extra* calls, not the total: the count below adds
+    // the session itself.
+    if (running > 0) {
+      this.stickyTools = { count: Math.max(peak, running), seq, since: now };
+    } else if (this.stickyTools.seq !== seq) {
+      // Idle with changed activity: either new activity or the end of the run
+      // we remembered. Either way the clock restarts now, so the drop to zero is
+      // the moment the linger begins and a gap between calls keeps showing the
+      // count that just finished. The run's peak is taken rather than the last
+      // sampled value -- a whole batch can start and finish between two frames
+      // (see `RenderState.toolPeak`), and `peak` never drops within a run.
+      this.stickyTools = { count: Math.max(this.stickyTools.count, peak), seq, since: now };
+    }
+
+    const extra =
+      now - this.stickyTools.since < TOOL_COUNT_LINGER_MS ? this.stickyTools.count : 0;
+    // The session is itself one of the tools at work, so the count is a floor
+    // of 1, not a sum: an open session on its own is "1 tool", and a single
+    // call running alongside it *still* reads "1 tool" -- the call is the
+    // session's own work, so it does not make the total go up. Only work beyond
+    // that (a batch, where several calls really are in use at once) raises the
+    // number. Never 0: something is always running while a session is open.
+    return Math.max(1, extra);
+  }
+
   render(s: RenderState): void {
     const width = this.cols;
     /**
@@ -326,26 +467,30 @@ export class Screen {
      * last line cannot survive underneath this one.
      */
     const height = Math.max(1, this.rows - 1);
-    // The picker overlays its own chrome (separator, title, query, list and
-    // hint), so it gets a much smaller transcript budget than the chat view;
-    // otherwise the frame overflows and the query line scrolls off-screen.
-    // On a very short terminal the chrome alone can exceed the height, so the
-    // list shrinks first (down to 0) to keep header + query + hint on screen.
-    // Extra rows the wrapped query occupies beyond its first line, so a long
-    // message does not push the list off the bottom.
-    const pickerFieldLen = s.picker ? s.picker.query.length : 0;
-    const pickerQueryExtra = s.picker
-      ? Math.max(0, Math.ceil(pickerFieldLen / Math.max(10, width - 3)) - 1)
-      : 0;
-    const pickerFixedChrome = 1 + 1 + 6 + pickerQueryExtra; // header + transcript-blank + chrome
-    const pickerSpace = s.picker ? Math.max(0, height - pickerFixedChrome - 2) : 0;
-    const pickerListHeight = s.picker
-      ? Math.max(0, Math.min(s.picker.items.length || 1, Math.floor(height / 3), pickerSpace))
-      : 0;
-    const pickerChrome = s.picker ? 6 + pickerListHeight + pickerQueryExtra : 0;
-    const viewport = s.picker
-      ? Math.max(0, height - 2 - pickerChrome)
-      : this.viewportRowsFor(s.input, width, height);
+
+    /*
+     * Two layouts share this method.
+     *
+     * The chat view paints a transcript above the input line. The session
+     * picker, whenever it is open, paints a *full-screen* frame instead: the
+     * last conversation stays off the screen entirely, so there is nothing
+     * above it to read as though it belonged to the highlighted row (or to the
+     * session you are about to open). The list is then sized to the whole
+     * terminal rather than to a third of it.
+     *
+     * So the header and the transcript rows are layed out first, and only the
+     * no-picker path goes on to draw them: `renderPicker` takes the frame over
+     * from row 2 down.
+     *
+     * The viewport is budgeted even for a picker frame, which draws no
+     * transcript at all. `lastViewportRows` describes the chat view to the
+     * rest of the app (scroll clamping, and the transcript size the next chat
+     * frame will use), so leaving it at 0 here made the chat view, on closing
+     * the picker, reflow against a full-terminal budget for one frame: the
+     * input line and status line were drawn at the wrong rows and then jumped
+     * into place on the next frame -- two carets on screen at once.
+     */
+    const viewport = this.viewportRowsFor(s.input, width, height);
 
     const all = this.styledEntries(s.entries, width);
     this.lastTotalLines = all.length;
@@ -368,150 +513,33 @@ export class Screen {
     // The header is one row, so it must never exceed `width - 1`: a row that
     // fills the last column triggers the terminal's pending-wrap state and
     // shifts the whole frame down one -- the same hazard the transcript wrap
-    // guards against. Only the title is unbounded, so the rest is measured
-    // first and the title truncated into what is left. Budgeting the title on
-    // its own was not enough: on a very narrow terminal the fixed parts
-    // (" coda session 1/1 · ") already fill the row, so any "room left for the
-    // title" still produced an over-long header.
-    const brand = " coda ";
-    const sessionPrefix = `session ${s.sessionIndex + 1}/${s.sessionCount} · `;
+    // guards against. `headerLine` measures the brand and version first and
+    // truncates the detail (session position, title, scroll indicator) into
+    // what is left.
     const scrollSuffix = offset > 0 ? ` · ▲ scrolled back ${offset}` : "";
-    const room = Math.max(0, width - 1);
-
     // The scroll indicator is short and tells you the view is not at the tail,
-    // so it is reserved before the title and the title shrinks instead. Drop it
-    // only when the brand plus the indicator alone fill the row.
+    // so it is reserved before the title and the title shrinks instead.
     let scrolled = scrollSuffix;
-    if (brand.length + scrolled.length >= room) scrolled = "";
-
-    const body = sessionPrefix + s.title;
-    const bodyRoom = Math.max(0, room - brand.length - scrolled.length);
-    let bodyText = body;
-    if (bodyText.length > bodyRoom) {
-      bodyText = bodyRoom >= 2 ? bodyText.slice(0, bodyRoom - 1) + "…" : bodyText.slice(0, bodyRoom);
-    }
-
-    const header =
-      BOLD +
-      brand +
-      RESET +
-      DIM +
-      bodyText +
-      (scrolled ? ` · ${YELLOW}${scrolled.slice(3)}${RESET}` : "") +
-      RESET;
+    const fixedHeaderWidth = " Code Automaton ".length + (this.version ? this.version.length + 2 : 0);
+    if (fixedHeaderWidth + scrolled.length >= width - 1) scrolled = "";
+    const headerDetail =
+      `session ${s.sessionIndex + 1}/${s.sessionCount} · ${s.title}` +
+      (scrolled ? `${YELLOW}${scrolled}${RESET}${DIM}` : "");
+    const header = this.headerLine(width, headerDetail, scrolled.length);
 
     // Content lines only -- CLEAR is written separately before them, so it
     // cannot shift the frame down by one row.
     const out: string[] = [];
+    // Every row starts from the left margin: the picker paints over the whole
+    // terminal, so rows after one left short (the header, say) must not inherit
+    // a column from where the previous row ended.
     out.push(header);
     out.push("");
-    for (const line of visible) out.push(line.slice(0, width * 4));
-
     if (s.picker) {
-      out.push("");
-      out.push(DIM + "─".repeat(Math.max(1, width - 1)) + RESET);
-
-      const p = s.picker;
-      out.push(
-        BOLD +
-          "Sessions" +
-          RESET +
-          DIM +
-          " (↑/↓ to move, Enter to open)" +
-          RESET
-      );
-
-      const listHeight = pickerListHeight;
-      // Edge-scroll the window instead of recentring it. The clamp keeps the
-      // highlight inside [pickerTop, pickerTop + listHeight); moving only when
-      // it would fall outside leaves the rows stationary while you arrow
-      // through the middle of the list, so what is on screen does not shift
-      // under the cursor.
-      const maxTop = Math.max(0, p.items.length - listHeight);
-      if (p.index < this.pickerTop) this.pickerTop = p.index;
-      else if (p.index >= this.pickerTop + listHeight) this.pickerTop = p.index - listHeight + 1;
-      this.pickerTop = Math.max(0, Math.min(this.pickerTop, maxTop));
-      const start = p.items.length === 0 ? 0 : this.pickerTop;
-      for (let i = start; i < Math.min(start + listHeight, p.items.length); i++) {
-        const item = p.items[i];
-        // Always show the highlight: the query no longer filters the list, so
-        // suppressing the highlight while typing made the selection invisible.
-        const active = p.items.length > 0 && i === p.index;
-        // A row must never exceed `width`, or the terminal soft-wraps it onto a
-        // second physical line. The cursor is then placed by counting logical
-        // rows, so it lands below the entry field it belongs to.
-        //
-        // Budget the row explicitly: prefix(2) + label + gap(1) + detail, capped
-        // at width - 1 so a full row still cannot trigger auto-wrap.
-        //
-        // The label gets whatever the detail does not need, rather than the
-        // detail being fixed at a small width: a hard cap here cut the date off
-        // mid-string ("11/1/20…") at every terminal width, even when there was
-        // room to spare. Only a genuinely cramped row should truncate.
-        const rowWidth = Math.max(10, width - 1);
-        const prefix = active ? "▸ " : "  ";
-        const detailText = `${item.detail}`;
-        const labelText = `${item.label}`;
-        // Reserve at least a readable label; give detail the rest, up to its
-        // natural length, so a short detail leaves more room for the label.
-        const labelMin = Math.min(20, Math.floor(rowWidth / 3));
-        const detailWidth = Math.max(0, Math.min(detailText.length, rowWidth - 2 - labelMin - 1));
-        const labelWidth = Math.max(4, rowWidth - 2 - detailWidth - 1);
-        const label = labelText.padEnd(labelWidth).slice(0, labelWidth);
-        const detail = detailText.slice(0, detailWidth);
-        const text = (prefix + label + " " + detail).slice(0, rowWidth);
-        if (active) {
-          out.push(REVERSE + text.padEnd(rowWidth) + RESET);
-        } else {
-          out.push("  " + label + " " + DIM + detail + RESET);
-        }
-      }
-      if (p.items.length === 0 && listHeight > 0) {
-        out.push(DIM + "  (no sessions)" + RESET);
-      }
-      out.push(DIM + "─".repeat(Math.max(1, width - 1)) + RESET);
-
-      // Entry field sits below the list, directly above the hint/status line.
-      // Typed text becomes the first message of a new session on Enter; it does
-      // not filter the list. Wrapped hard so a long message cannot overrun the
-      // width and push the rest of the frame down when the terminal soft-wraps.
-      const queryRowIdx = out.length;
-      const queryRows = wrapHard(p.query, Math.max(10, width - 3));
-      for (let i = 0; i < queryRows.length; i++) {
-        out.push((i === 0 ? CYAN + "> " + RESET : "  ") + queryRows[i]);
-      }
-      // Hint rows are single lines, so each is clamped to the terminal width.
-      // An overlong hint soft-wraps onto a second line, which shifts every row
-      // below it -- including the entry field, whose cursor is placed by
-      // counting logical rows.
-      const fit = (text: string): string => text.slice(0, Math.max(1, width - 1));
-      out.push(
-        DIM +
-          fit(
-            p.renaming
-              ? "rename · Enter save · Esc cancel · empty resets to auto-title"
-              : "↑/↓ pick · Enter " +
-                  (p.query ? "start new session" : "open session") +
-                  " · type to start a new session · Ctrl+X delete · Alt+R rename"
-          ) +
-          RESET
-      );
-
-      this.draw(out);
-
-      // Place the cursor at the edit position, accounting for wrapping. For an
-      // ordinary query that is the end of the typed text; while renaming it is
-      // the title editor's own caret, so Left/Home move it within the field.
-      // Same end-of-row rule as the chat input: when the text exactly fills a
-      // row the caret stays on that row rather than jumping to the next.
-      const qWidth = Math.max(10, width - 3);
-      const qLen = p.renaming ? Math.max(0, Math.min(p.cursor, p.query.length)) : p.query.length;
-      const qAtEnd = qLen > 0 && qLen % qWidth === 0;
-      const qRow = qAtEnd ? qLen / qWidth - 1 : Math.floor(qLen / qWidth);
-      const qCol = qAtEnd ? qWidth : qLen % qWidth;
-      this.placeCursor(width, queryRowIdx + qRow, 2 + qCol);
+      this.renderPicker(s.picker, out, width, height);
       return;
     }
+    for (const line of visible) out.push(line.slice(0, width * 4));
 
     // ---- Chat input: wrapped, with a real cursor at the edit position ----
     // While a title is being edited (Alt+R) the same line edits the title
@@ -546,15 +574,31 @@ export class Screen {
     const statusTag =
       s.status === "thinking" ? YELLOW + "● thinking" + RESET : DIM + "○ idle" + RESET;
     const scrollHint = offset > 0 ? DIM + " · PgDn/End to return" + RESET : "";
-    const hint = s.rename
-      ? "rename · Enter save · Esc cancel · empty resets to auto-title"
-      : "← sessions · ↑↓ scroll · Ctrl+T new · Ctrl+X close · Ctrl+C exit";
-    // The status line is a single row: an overlong hint (a long title in the
-    // rename prompt) would soft-wrap and shift the row the caret is placed on.
-    // `statusTag` is plain text here plus escape codes; ASCII only, so its raw
-    // length is a safe allowance. The 3 covers the gap after it.
+    // The status line carries live information only: the turn status, the
+    // number of tool calls in flight, and (while scrolled back) how to return
+    // to the tail. The keyboard hints that used to sit here are gone -- they
+    // are documented in /help and the README, and repeating them on every
+    // frame crowded out information that actually changes.
+    //
+    // While a title is being edited the line becomes the editor's own hint,
+    // since Enter and Esc do something different there and getting that wrong
+    // would discard the edit.
+    // Always shown: an open session is itself one of the tools in use.
+    const tools = this.stickyToolCount(s.runningTools, s.toolSeq, s.toolPeak);
+    const toolTag = DIM + ` · ${toolCount(tools)}` + RESET;
+    // The status line is one row: an overlong hint (a long title in the rename
+    // prompt) would soft-wrap and shift the row the caret is placed on, so the
+    // rename hint is clamped to what is left after the status tag.
+    const renameHint = "rename · Enter save · Esc cancel · empty resets to auto-title";
+    // `statusTag` is plain text plus escape codes, ASCII only, so its raw length
+    // is a safe allowance. The 3 covers the gap after it.
     const hintWidth = Math.max(1, width - 1 - statusTag.length - 3);
-    out.push(statusTag + DIM + "   " + hint.slice(0, hintWidth) + RESET + scrollHint);
+    out.push(
+      statusTag +
+        toolTag +
+        scrollHint +
+        (s.rename ? DIM + "   " + renameHint.slice(0, hintWidth) + RESET : "")
+    );
 
     this.draw(out);
 
@@ -563,6 +607,121 @@ export class Screen {
     // then the input from viewport+3.
     const inputFirstRow = viewport + 3;
     this.placeCursor(width, inputFirstRow + (curRow - firstVisibleRow), 2 + curCol);
+  }
+
+  /**
+   * Fill `out` -- already holding the header and its blank row -- with the
+   * full-screen session picker and paint it, leaving the cursor in the entry
+   * field.
+   *
+   * `draw()` is called here and not by the caller: it parks the cursor at the
+   * top row (1;1), so painting before placing the caret would flash the cursor
+   * in the top-left corner on every frame. `renderPicker` therefore owns both
+   * the frame and the caret.
+   *
+   * The picker owns everything from row 2 down: no transcript and no chat
+   * input are drawn while it is open, so the previous conversation cannot be
+   * mistaken for part of the list. The frame is built to exactly `height`
+   * rows: a fixed block (separators, "Sessions" heading, entry field, hint)
+   * and a list that takes every row left over, which is what "full screen"
+   * buys -- as many sessions visible as the terminal can show.
+   *
+   * A row that fills the last column leaves the terminal in its pending-wrap
+   * state, so the following newline moves down *two* rows and every row after
+   * it is drawn shifted. Every row here therefore stays within `width - 1`.
+   */
+  private renderPicker(
+    p: NonNullable<RenderState["picker"]>,
+    out: string[],
+    width: number,
+    height: number
+  ): void {
+    const fit = (text: string): string => text.slice(0, Math.max(1, width - 1));
+    const rule = DIM + "─".repeat(Math.max(1, width - 1)) + RESET;
+
+    // Entry field: first, so the list can be given whatever is left over. A
+    // long message wraps rather than being cut.
+    const queryWidth = Math.max(10, width - 3);
+    const queryRows = wrapHard(p.query, queryWidth);
+    const hint = p.renaming
+      ? "rename · Enter save · Esc cancel · empty resets to auto-title"
+      : "↑/↓ pick · Enter " +
+        (p.query ? "start new session" : "open session") +
+        " · type to start a new session · Ctrl+X delete · Alt+R rename";
+
+    // Rows left for the list: the terminal, less the header and its blank row,
+    // less the three fixed rows below the list (rule, entry field, rule) and
+    // the hint, less the section heading when it is drawn.
+    //
+    // The heading is only worth a row when a session row fits under it too --
+    // on a very short terminal the list matters more than its title.
+    const headingRows = height >= 8 ? 1 : 0;
+    const listRows = Math.max(0, height - 2 - (3 + queryRows.length) - 1 - headingRows);
+
+    // The entry field's row is reached by counting the rows pushed above it,
+    // and that count holds whether or not the list has rows left -- so on a
+    // terminal too short to show one, the cursor still lands on the field.
+    out.push(rule);
+    if (listRows > 0) {
+      out.push(BOLD + "Sessions" + RESET + DIM + " (↑/↓ to move, Enter to open)" + RESET);
+    }
+    // Scroll the window to the highlight. The window is kept as state and only
+    // moves when the highlight would leave it, so rows stay put under the
+    // cursor instead of the whole list sliding every few presses.
+    const maxTop = Math.max(0, p.items.length - listRows);
+    if (p.index < this.pickerTop) this.pickerTop = p.index;
+    else if (p.index >= this.pickerTop + listRows) this.pickerTop = p.index - listRows + 1;
+    this.pickerTop = Math.max(0, Math.min(this.pickerTop, maxTop));
+
+    const start = p.items.length === 0 ? 0 : this.pickerTop;
+    const end = Math.min(start + listRows, p.items.length);
+    let drawn = 0;
+    for (let i = start; i < end; i++) {
+      const item = p.items[i];
+      // Always show the highlight: the query does not filter the list, so
+      // suppressing it while typing made the selection invisible.
+      const active = i === p.index;
+      // Budget the row: prefix(2) + label + gap(1) + detail, capped at width-1.
+      // The label takes whatever the detail does not need -- a hard cap on the
+      // detail cut dates off mid-string even when there was room to spare.
+      const rowWidth = Math.max(10, width - 1);
+      const labelMin = Math.min(20, Math.floor(rowWidth / 3));
+      const detailWidth = Math.max(0, Math.min(item.detail.length, rowWidth - 2 - labelMin - 1));
+      const labelWidth = Math.max(4, rowWidth - 2 - detailWidth - 1);
+      const label = item.label.padEnd(labelWidth).slice(0, labelWidth);
+      const detail = item.detail.slice(0, detailWidth);
+      const text = ((active ? "▸ " : "  ") + label + " " + detail).slice(0, rowWidth);
+      out.push(active ? REVERSE + text.padEnd(rowWidth) + RESET : "  " + label + " " + DIM + detail + RESET);
+      drawn++;
+    }
+    if (p.items.length === 0 && listRows > 0) {
+      out.push(DIM + "  (no sessions)" + RESET);
+      drawn++;
+    }
+    // Fill the rest of the list so the entry field sits at the bottom of the
+    // screen rather than jumping up and down with the number of sessions.
+    for (let i = drawn; i < listRows; i++) out.push("");
+
+    out.push(rule);
+    const queryRowIdx = out.length;
+    for (let i = 0; i < queryRows.length; i++) {
+      out.push((i === 0 ? CYAN + "> " + RESET : "  ") + queryRows[i]);
+    }
+    out.push(rule);
+    out.push(DIM + fit(hint) + RESET);
+
+    this.draw(out);
+
+    // Place the cursor at the edit position, accounting for wrapping. For an
+    // ordinary query that is the end of the typed text; while renaming it is
+    // the title editor's own caret, so Left/Home move it within the field.
+    // Same end-of-row rule as the chat input: when the text exactly fills a
+    // row the caret stays on that row rather than jumping to the next.
+    const qLen = p.renaming ? Math.max(0, Math.min(p.cursor, p.query.length)) : p.query.length;
+    const qAtEnd = qLen > 0 && qLen % queryWidth === 0;
+    const qRow = qAtEnd ? qLen / queryWidth - 1 : Math.floor(qLen / queryWidth);
+    const qCol = qAtEnd ? queryWidth : qLen % queryWidth;
+    this.placeCursor(width, queryRowIdx + qRow, 2 + qCol);
   }
 
   /**
