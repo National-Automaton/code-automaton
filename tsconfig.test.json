@@ -1,0 +1,11 @@
+{
+  // Type-check the tests without letting them into the published build:
+  // tsconfig.json only includes src/. `tsx` runs the tests directly, so this
+  // config exists for `npm run typecheck` to catch a broken test file.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "test/**/*"]
+}
