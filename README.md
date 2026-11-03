@@ -69,6 +69,11 @@ renames and new messages are picked up, and sessions deleted elsewhere
 disappear. A session that is still running a turn in this terminal is left
 alone — its in-flight output has not been written yet, so it would be clobbered.
 
+The picker is always sorted most-recently-updated first, so two terminals list
+the sessions they can both see in the same order. A session that has not been
+used yet is not on disk (an empty session is not saved), so it appears only in
+the terminal that started it until its first message.
+
 A session you open is **locked** for as long as this terminal is on it, so a
 second terminal cannot open the same session and overwrite your work. The lock
 is advisory — a small `<id>.lock` file beside the session, refreshed with a

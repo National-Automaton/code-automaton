@@ -159,7 +159,18 @@ export class App {
    * `onPickerKey`).
    */
   private pickerSessions(): Session[] {
-    return this.sessions;
+    // Canonical order: most recently updated first. The underlying `sessions`
+    // array is NOT in this order -- records load newest-first, while new
+    // sessions and sessions discovered by a refresh are appended -- so two
+    // terminals that had done different things listed the same saved sessions
+    // in different rows. Sorting here, at the single point the list is read for
+    // both rendering and `items[index]` lookups, makes every terminal agree on
+    // the order of the sessions they can both see.
+    //
+    // A sort of a copy, not of `this.sessions`: the array's own order is what
+    // `active` and the picker index are stored against, and reordering it
+    // underneath them would move the highlight to a different session.
+    return [...this.sessions].sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   /**
@@ -746,12 +757,12 @@ export class App {
   }
 
   private openPicker(): void {
-    // Select the current session by identity, not array position. `sessions`
-    // mixes two orders -- loaded records are newest-first, while new sessions
-    // are appended -- so indexOf() pointed at the wrong row and the highlight
-    // landed on the last item instead of the session you were in.
+    // Highlight the session you are in. The index must be found in the *sorted*
+    // picker list, since that is what `picker.index` counts against -- looking
+    // it up in `this.sessions` (whose order differs) put the highlight on the
+    // wrong row.
     const cur = this.current();
-    const idx = this.sessions.findIndex((s) => s.id === cur.id);
+    const idx = this.pickerSessions().findIndex((s) => s.id === cur.id);
     this.picker = {
       index: Math.max(0, idx),
       query: new LineBuffer(),
@@ -801,7 +812,11 @@ export class App {
     // number -- for the picker highlight that meant the selection silently
     // jumping to a different session after a refresh.
     const activeIdBefore = this.current()?.id;
-    const highlightedIdBefore = this.picker ? this.sessions[this.picker.index]?.id : undefined;
+    // Index into the *sorted* picker list, which is what `picker.index` counts
+    // against -- not `this.sessions`, whose order differs (see pickerSessions).
+    const highlightedIdBefore = this.picker
+      ? this.pickerSessions()[this.picker.index]?.id
+      : undefined;
 
     // Drop sessions that vanished from disk, keeping any that are mid-turn.
     // pruneEmptySessions keeps placeholders that have no file at all, so those
@@ -837,13 +852,14 @@ export class App {
       }
     }
 
-    // A refresh can shrink or grow the list under the picker. Re-anchor the
-    // highlight to the same session it was on (now at a new row), and only
-    // fall back to clamping when that session was itself removed.
+    // A refresh can shrink, grow or reorder the list under the picker.
+    // Re-anchor the highlight to the same session it was on (now at a possibly
+    // different row in the sorted list), and only fall back to clamping when
+    // that session was itself removed.
     if (this.picker) {
       const p = this.picker;
       const moved = highlightedIdBefore
-        ? this.sessions.findIndex((s) => s.id === highlightedIdBefore)
+        ? this.pickerSessions().findIndex((s) => s.id === highlightedIdBefore)
         : -1;
       if (moved >= 0) p.index = moved;
       this.clampPickerIndex();
