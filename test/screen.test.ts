@@ -515,6 +515,51 @@ await (async () => {
     );
   }
 
+  // A session locked by another coda says so on its row, and the hint explains
+  // the remedy. Without this the refusal was invisible: it went to the
+  // transcript, which the full-screen picker does not draw.
+  {
+    const screen = screenAt(size.cols, size.rows);
+    const lockedItems = [
+      { label: "free session", detail: "3 msgs · idle", locked: null },
+      { label: "held session", detail: "9 msgs · idle", locked: "pid 4027" },
+    ];
+    const frame = renderAt(size.cols, size.rows, screen, {
+      ...chatState(),
+      picker: { items: lockedItems, index: 0, query: "", cursor: 0, renaming: false },
+    });
+    const rows = frame.rows.map(strip);
+    const heldRow = rows.find((r) => r.includes("held session"));
+    assert.ok(heldRow, "the locked session should be listed");
+    assert.ok(
+      heldRow!.includes("open in pid 4027"),
+      `the locked row should say who holds it, got ${JSON.stringify(heldRow)}`
+    );
+    // Its own detail is replaced by the lock message -- the count is not useful
+    // for a row that cannot be opened.
+    assert.ok(!heldRow!.includes("9 msgs"), "the locked row should show the lock, not its stats");
+    // A free row keeps its detail and gains no marker.
+    const freeRow = rows.find((r) => r.includes("free session"))!;
+    assert.ok(freeRow.includes("3 msgs"), "an unlocked row keeps its detail");
+    assert.ok(!freeRow.includes("open in"), "an unlocked row must not be marked locked");
+    // The hint explains the remedy, and the whole frame still fits.
+    assert.ok(
+      rows.some((r) => r.includes("open in another coda")),
+      "the hint should explain why the row cannot be opened"
+    );
+    checkFrame(frame, size, `picker/locked ${size.cols}x${size.rows}`);
+  }
+
+  // No locked rows: no note, and nothing invented.
+  {
+    const screen = screenAt(size.cols, size.rows);
+    const frame = renderAt(size.cols, size.rows, screen, pickerState());
+    assert.ok(
+      !frame.rows.some((r) => strip(r).includes("open in another coda")),
+      "the lock note must not appear when nothing is locked"
+    );
+  }
+
   // The rename editor keeps its own hint: Enter and Esc mean something else
   // there, so dropping it would make it easy to discard an edit by accident.
   {

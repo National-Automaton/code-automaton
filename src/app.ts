@@ -3,6 +3,7 @@ import { Key, KeyReader } from "./keys.js";
 import { LineBuffer } from "./linebuffer.js";
 import { Screen, PickerItem } from "./screen.js";
 import { Session } from "./session.js";
+import { lockHolder } from "./lock.js";
 import { loadAll } from "./store.js";
 import type { SessionRecord } from "./store.js";
 import { attachImage, clipboardContents, clipboardImagePath, ImageError } from "./image.js";
@@ -72,6 +73,15 @@ export class App {
   /** Images attached with /image, waiting to ride along with the next message. */
   private pendingImages: AttachedImage[] = [];
   private renderQueued = false;
+  /**
+   * Sessions whose lock another coda holds: session id -> holder description.
+   *
+   * `render()` is synchronous and must not await a filesystem probe, so the
+   * picker's "locked by …" markers are served from this cache. It is filled by
+   * `refreshLockHolders()`, which runs when the picker opens and again on each
+   * refresh -- the same points at which the sessions list is re-read.
+   */
+  private heldByOther = new Map<string, string>();
 
   constructor(private config: Config) {
     // The version shown in the header comes from package.json, so `npm version`
@@ -155,6 +165,9 @@ export class App {
       detail:
         `${s.entries.length} msgs · ${s.status === "thinking" ? "● thinking" : "idle"} · ` +
         new Date(s.updatedAt).toLocaleString(),
+      // A session this terminal already holds is openable, so only report a
+      // lock held by somebody else.
+      locked: s.lockHeld ? null : (this.heldByOther.get(s.id) ?? null),
     }));
 
     this.screen.render({
@@ -606,10 +619,19 @@ export class App {
     if (!res.ok) {
       // Could not take the lock: put the user back where they were rather than
       // leaving them in a session another terminal owns.
+      //
+      // The note goes to the transcript, which is right when this happens in
+      // the chat view -- but the picker covers the transcript, so the picker
+      // also marks the row itself (see `RenderState.picker.items[].locked`).
+      // The marker is what makes a refusal visible when it happens *in* the
+      // picker; this note is for the case where the chat view is showing.
       this.systemNote(
         `session "${session.title}" is open in another terminal (${res.heldBy}); ` +
           `close it there, or wait for it to go stale`
       );
+      // Reflect the refusal in the picker immediately: `acquire` has just
+      // read the lock, so the marker can be set without another probe.
+      this.heldByOther.set(session.id, res.heldBy);
       if (leaving) this.setActive(leaving);
       this.requestRender();
       return false;
@@ -868,6 +890,7 @@ export class App {
     // A reopened picker starts at the top of the list; the window otherwise
     // keeps wherever the last one was scrolled to.
     this.screen.resetPickerWindow();
+    void this.refreshLockHolders();
     this.requestRender();
     // Pull in changes made by other terminals. The picker is already on screen
     // with the list we have, so the refresh lands as a second frame rather than
@@ -967,6 +990,32 @@ export class App {
       if (moved >= 0) p.index = moved;
       this.clampPickerIndex();
     }
+    void this.refreshLockHolders();
+    this.requestRender();
+  }
+
+  /**
+   * Refresh the "locked by another terminal" markers the picker draws.
+   *
+   * `render()` is synchronous, so it cannot probe the lock files itself; this
+   * fills the cache it reads. Only sessions whose lock this terminal does not
+   * already hold are probed -- the rest are openable by definition.
+   *
+   * A stale lock is reported as unlocked (see `lockHolder`), because `acquire`
+   * would steal it: saying "locked" there would send the user looking for a
+   * process that no longer exists.
+   */
+  private async refreshLockHolders(): Promise<void> {
+    const next = new Map<string, string>();
+    await Promise.all(
+      this.sessions
+        .filter((s) => !s.lockHeld)
+        .map(async (s) => {
+          const holder = await lockHolder(s.id).catch(() => null);
+          if (holder) next.set(s.id, holder);
+        })
+    );
+    this.heldByOther = next;
     this.requestRender();
   }
 
