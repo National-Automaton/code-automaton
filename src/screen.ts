@@ -80,7 +80,15 @@ export interface RenderState {
   picker: {
     items: PickerItem[];
     index: number;
+    /**
+     * Text in the entry field. Normally the query that (on Enter) starts a new
+     * session; while `renaming` it is the title being edited in place.
+     */
     query: string;
+    /** Caret offset within `query` while `renaming`; ignored otherwise. */
+    cursor: number;
+    /** True while the highlighted session's title is being edited here. */
+    renaming: boolean;
   } | null;
   /**
    * Set while a session's title is being edited from the chat view (Alt+R).
@@ -428,20 +436,24 @@ export class Screen {
       out.push(
         DIM +
           fit(
-            "↑/↓ pick · Enter " +
-              (p.query ? "start new session" : "open session") +
-              " · type to start a new session · Ctrl+X delete · Alt+R rename"
+            p.renaming
+              ? "rename · Enter save · Esc cancel · empty resets to auto-title"
+              : "↑/↓ pick · Enter " +
+                  (p.query ? "start new session" : "open session") +
+                  " · type to start a new session · Ctrl+X delete · Alt+R rename"
           ) +
           RESET
       );
 
       this.draw(out);
 
-      // Place the cursor at the end of the typed text, accounting for wrapping.
+      // Place the cursor at the edit position, accounting for wrapping. For an
+      // ordinary query that is the end of the typed text; while renaming it is
+      // the title editor's own caret, so Left/Home move it within the field.
       // Same end-of-row rule as the chat input: when the text exactly fills a
       // row the caret stays on that row rather than jumping to the next.
       const qWidth = Math.max(10, width - 3);
-      const qLen = p.query.length;
+      const qLen = p.renaming ? Math.max(0, Math.min(p.cursor, p.query.length)) : p.query.length;
       const qAtEnd = qLen > 0 && qLen % qWidth === 0;
       const qRow = qAtEnd ? qLen / qWidth - 1 : Math.floor(qLen / qWidth);
       const qCol = qAtEnd ? qWidth : qLen % qWidth;

@@ -19,11 +19,18 @@ export class App {
   /** Picker state: highlighted row and the "start a new session" field. */
   private picker: { index: number; query: LineBuffer } | null = null;
   /**
-   * Title editor, non-null while a session's title is being edited (Alt+R in
-   * the chat view). It holds the target session and the edit buffer, which
-   * starts pre-filled with the current title.
+   * Title editor, non-null while a session's title is being edited (Alt+R).
+   * It holds the target session and the edit buffer, which starts pre-filled
+   * with the current title.
+   *
+   * `fromPicker` records where the edit began. Renaming the highlighted session
+   * from the picker must leave you in the picker when it finishes -- the
+   * editor overlays the list, so you keep your place -- whereas an Alt+R in the
+   * chat view returns to the chat. Without this the picker was torn down on
+   * Alt+R and Enter dropped you into the *active* session, which is often not
+   * the one whose title you were editing.
    */
-  private rename: { id: string; buffer: LineBuffer } | null = null;
+  private rename: { id: string; buffer: LineBuffer; fromPicker: boolean } | null = null;
   /** Lines scrolled back from the tail of the transcript. */
   private scroll = 0;
   private screen: Screen;
@@ -106,7 +113,19 @@ export class App {
         ? {
             items,
             index: this.picker.index,
-            query: this.picker.query.value,
+            // A rename started from the picker is edited in the picker's own
+            // entry field, in place under the highlighted row, rather than
+            // kicking the view back to the chat and showing some other
+            // session's transcript while you edit this one's title.
+            query:
+              this.rename && this.rename.fromPicker
+                ? this.rename.buffer.value
+                : this.picker.query.value,
+            cursor:
+              this.rename && this.rename.fromPicker
+                ? this.rename.buffer.cursor
+                : this.picker.query.cursor,
+            renaming: !!(this.rename && this.rename.fromPicker),
           }
         : null,
       rename:
@@ -162,11 +181,11 @@ export class App {
     else this.onChatKey(k);
   }
 
-  /** Begin editing the active session's title, pre-filled with the current one. */
-  private startRename(session: Session): void {
+  /** Begin editing a session's title, pre-filled with the current one. */
+  private startRename(session: Session, fromPicker = false): void {
     const buffer = new LineBuffer();
     buffer.set(session.title);
-    this.rename = { id: session.id, buffer };
+    this.rename = { id: session.id, buffer, fromPicker };
     this.requestRender();
   }
 
@@ -182,11 +201,15 @@ export class App {
 
     switch (k.type) {
       case "enter":
+        // A picker rename overlays the list rather than replacing it, so the
+        // picker is still set: clearing `rename` just returns to it, with the
+        // highlight where it was. A chat-view rename has no picker to return
+        // to and simply lands back in the chat view.
         this.rename = null;
         if (target) void target.rename(b.value);
         break;
       case "escape":
-        this.rename = null; // discard the edit
+        this.rename = null; // discard the edit (and return to the picker if it began there)
         break;
       case "left":
         b.left();
@@ -320,12 +343,11 @@ export class App {
         else if (k.ch === "r") {
           // Rename the highlighted session, not the active one: the list is
           // what you are looking at, and the chat view's Alt+R is one keypress
-          // away for the session you already have open. Close the picker so
-          // the title editor is not hidden behind the overlay.
+          // away for the session you already have open. The picker stays set
+          // underneath the title editor -- it is what `fromPicker` restores on
+          // Enter/Esc, so renaming never drops you into another session.
           if (n > 0) {
-            const target = items[p.index];
-            this.picker = null;
-            this.startRename(target);
+            this.startRename(items[p.index], true);
           }
         }
         this.requestRender();
