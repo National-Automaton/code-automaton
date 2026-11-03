@@ -99,7 +99,8 @@ export class App {
   }
 
   private render(): void {
-    const items: PickerItem[] = this.pickerSessions().map((s) => ({
+    const pickerList = this.pickerSessions();
+    const items: PickerItem[] = pickerList.map((s) => ({
       label: s.title,
       detail:
         `${s.entries.length} msgs · ${s.status === "thinking" ? "● thinking" : "idle"} · ` +
@@ -112,7 +113,14 @@ export class App {
       cursor: this.input.cursor,
       status: this.current().status,
       title: this.current().title,
-      sessionIndex: this.active,
+      // Report the session's position in the SAME order the picker lists, not
+      // its slot in `this.sessions`. The two arrays are ordered differently --
+      // records load newest-first while new sessions are appended -- so the raw
+      // `active` index named a different row than the one just picked: always
+      // the row above, because the fresh session sorts to the top of the list
+      // while sitting last in `sessions`. The header then appeared to say a
+      // different session had opened than the one selected.
+      sessionIndex: Math.max(0, pickerList.findIndex((s) => s === this.current())),
       sessionCount: this.sessions.length,
       scrollOffset: this.scroll,
       picker: this.picker
