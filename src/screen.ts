@@ -139,6 +139,18 @@ export class Screen {
   private lastTotalLines = 0;
   /** Rows actually visible for the transcript in the last render. */
   private lastViewportRows = 0;
+  /**
+   * First list row the picker window currently shows.
+   *
+   * The window used to recentre on the highlight every frame
+   * (`index - listHeight/2`), which with more sessions than fit meant the whole
+   * list slid up one row every few presses -- so the row on a given screen line
+   * changed without any obvious cue, and a quick Down-then-Enter could act on a
+   * different session than the one just read. Instead the window is kept as
+   * state and only moves when the highlight would leave it, so rows stay put
+   * until you actually reach the edge.
+   */
+  private pickerTop = 0;
   private resizeHandler = () => {
     this.cols = stdout.columns || 80;
     this.rows = stdout.rows || 24;
@@ -217,6 +229,15 @@ export class Screen {
    * scroll the transcript.
    */
   constructor(private mouse = true) {}
+
+  /**
+   * Forget the picker's scroll position so the next frame starts at the top.
+   * Called when the picker opens; without it a window scrolled far down would
+   * persist into a reopened picker and could leave the highlight off-screen.
+   */
+  resetPickerWindow(): void {
+    this.pickerTop = 0;
+  }
 
   start(): void {
     stdout.on("resize", this.resizeHandler);
@@ -373,13 +394,16 @@ export class Screen {
       );
 
       const listHeight = pickerListHeight;
-      const start =
-        p.items.length === 0
-          ? 0
-          : Math.max(
-              0,
-              Math.min(p.index - Math.floor(listHeight / 2), p.items.length - listHeight)
-            );
+      // Edge-scroll the window instead of recentring it. The clamp keeps the
+      // highlight inside [pickerTop, pickerTop + listHeight); moving only when
+      // it would fall outside leaves the rows stationary while you arrow
+      // through the middle of the list, so what is on screen does not shift
+      // under the cursor.
+      const maxTop = Math.max(0, p.items.length - listHeight);
+      if (p.index < this.pickerTop) this.pickerTop = p.index;
+      else if (p.index >= this.pickerTop + listHeight) this.pickerTop = p.index - listHeight + 1;
+      this.pickerTop = Math.max(0, Math.min(this.pickerTop, maxTop));
+      const start = p.items.length === 0 ? 0 : this.pickerTop;
       for (let i = start; i < Math.min(start + listHeight, p.items.length); i++) {
         const item = p.items[i];
         // Always show the highlight: the query no longer filters the list, so

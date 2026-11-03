@@ -267,12 +267,17 @@ export class App {
     const q = p.query;
 
     switch (k.type) {
+      // Clamp at the ends rather than wrapping. Wrapping from the last row to
+      // the first is a silent jump to a different session: press Up at the top
+      // (or Down at the bottom) and the highlight reappears on a row you did
+      // not move to, so Enter opens something else. Stopping dead at the end
+      // makes it obvious you have reached it.
       case "up":
-        if (n > 0) p.index = (p.index - 1 + n) % n;
+        if (n > 0) p.index = Math.max(0, p.index - 1);
         this.requestRender();
         return;
       case "down":
-        if (n > 0) p.index = (p.index + 1) % n;
+        if (n > 0) p.index = Math.min(n - 1, p.index + 1);
         this.requestRender();
         return;
       case "escape":
@@ -333,7 +338,19 @@ export class App {
           // Nothing typed => open the highlighted session. A session locked by
           // another terminal refuses the switch; keep the picker open so the
           // note (and the list) stay visible and another row can be chosen.
+          //
+          // `items[p.index]` is resolved here, at the keypress, not at the
+          // render that drew the highlight -- the two can differ if the list
+          // shrank between them. If the index no longer names a row, say so
+          // rather than falling back to the first entry, which would open a
+          // session the user never selected.
           const target = items[p.index];
+          if (!target) {
+            this.systemNote("that session is no longer in the list");
+            this.clampPickerIndex();
+            this.requestRender();
+            return;
+          }
           this.picker = null;
           void this.openSession(target).then((opened) => {
             if (!opened) {
@@ -756,6 +773,9 @@ export class App {
       index: Math.max(0, idx),
       query: new LineBuffer(),
     };
+    // A reopened picker starts at the top of the list; the window otherwise
+    // keeps wherever the last one was scrolled to.
+    this.screen.resetPickerWindow();
     this.requestRender();
     // Pull in changes made by other terminals. The picker is already on screen
     // with the list we have, so the refresh lands as a second frame rather than
