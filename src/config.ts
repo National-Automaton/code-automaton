@@ -33,6 +33,13 @@ export interface Config {
    * shell commands assume they are the only thing running.
    */
   parallelTools: boolean;
+  /**
+   * Replace old turns with a summary once history passes the compaction
+   * threshold, instead of waiting for the hard trim. Off by default: the
+   * saving scales with input-token price, so it is worth enabling only on a
+   * premium model. Set CODA_COMPACT=on to enable.
+   */
+  compact: boolean;
 }
 
 /**
@@ -133,6 +140,16 @@ export function loadConfig(): Config {
   const parallelEnv = (env("CODA_PARALLEL_TOOLS") ?? "").toLowerCase();
   const parallelTools = !["0", "off", "false", "no", "none"].includes(parallelEnv);
 
+  // History compaction is OFF by default and opted into with CODA_COMPACT=on.
+  //
+  // It is not automatic because the payoff depends entirely on input price:
+  // measured against a real 285-turn session, compacting saved ~$0.30 on
+  // deepseek-flash but ~$223 on claude-sonnet. Turning it on for everyone
+  // would discard context and invalidate the provider's cache prefix to save
+  // cents. Users on a premium model turn it on; the default costs nothing.
+  const compactEnv = (env("CODA_COMPACT") ?? "").toLowerCase();
+  const compact = ["1", "on", "true", "yes"].includes(compactEnv);
+
   return {
     apiKey,
     baseURL,
@@ -142,5 +159,6 @@ export function loadConfig(): Config {
     visionApiKey: env("CODA_VISION_API_KEY") ?? apiKey,
     mouse,
     parallelTools,
+    compact,
   };
 }

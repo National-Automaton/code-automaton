@@ -4,6 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { stripImagesForStorage, restoreImagesForLoad } from "./image.js";
+import { isValidJson } from "./agent.js";
 
 /**
  * Where sessions live on disk. `CODA_SESSIONS_DIR` (or the older
@@ -74,6 +75,63 @@ export function newId(): string {
   return randomUUID();
 }
 
+/**
+ * Remove tool calls whose `arguments` were truncated, and the replies to them.
+ *
+ * A call cut off at the output-token cap holds invalid JSON, and providers
+ * validate every call in the history on every request -- one of them makes each
+ * later send fail with a bare "400 invalid argument", so the session is stranded
+ * and cannot be recovered through the UI. New turns are checked before they are
+ * committed (see `Agent.send`); this repairs histories written before that
+ * check existed, and any damaged by another client.
+ *
+ * The assistant's prose is kept even when its calls go: it may be the only
+ * record of what the model said. A turn left with neither text nor calls is
+ * dropped rather than sent as an empty message.
+ *
+ * Returns the same array when nothing is wrong, so a healthy history is not
+ * needlessly copied on every load.
+ */
+export function repairMalformedToolCalls(
+  messages: ChatCompletionMessageParam[]
+): ChatCompletionMessageParam[] {
+  const isBad = (m: any) =>
+    m?.role === "assistant" &&
+    Array.isArray(m.tool_calls) &&
+    m.tool_calls.some((c: any) => !isValidJson(c?.function?.arguments));
+
+  if (!messages.some(isBad)) return messages;
+
+  const out: ChatCompletionMessageParam[] = [];
+  // Ids of the calls being removed, so the matching `tool` replies go with them.
+  const dropped = new Set<string>();
+
+  for (const m of messages as any[]) {
+    if (m?.role === "tool" && dropped.has(m.tool_call_id)) continue;
+
+    if (!isBad(m)) {
+      out.push(m);
+      continue;
+    }
+
+    const kept = m.tool_calls.filter((c: any) => {
+      if (isValidJson(c?.function?.arguments)) return true;
+      if (c?.id) dropped.add(c.id);
+      return false;
+    });
+
+    const hasText = typeof m.content === "string" && m.content.trim() !== "";
+    if (kept.length === 0 && !hasText) continue;
+
+    const { tool_calls, ...rest } = m;
+    out.push({
+      ...rest,
+      ...(kept.length ? { tool_calls: kept } : {}),
+    } as ChatCompletionMessageParam);
+  }
+  return out;
+}
+
 /** Load all sessions, newest first. Skips corrupt files. */
 export async function loadAll(): Promise<SessionRecord[]> {
   await ensureDir();
@@ -92,6 +150,7 @@ export async function loadAll(): Promise<SessionRecord[]> {
       if (isRecord(parsed)) {
         // Re-read any screenshots referenced by placeholder text so a reloaded
         // session still lets the model see what it was asked about.
+        parsed.messages = repairMalformedToolCalls(parsed.messages);
         parsed.messages = await Promise.all(
           parsed.messages.map(async (m: any) =>
             Array.isArray(m?.content)
