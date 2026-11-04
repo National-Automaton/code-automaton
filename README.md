@@ -299,6 +299,37 @@ whether an arbitrary command writes would mean parsing shell syntax and getting
 it wrong occasionally — if you would rather have strict request order, set
 `CODA_PARALLEL_TOOLS=off`.
 
+## History compaction
+
+Every request re-sends the whole conversation, so a long session costs more per
+turn as it goes. Left alone, history grows at roughly 2,800 tokens per turn until
+it reaches `CODA_MAX_CONTEXT_CHARS` (~800k tokens, around 285 turns), at which
+point the oldest turns are dropped outright.
+
+`CODA_COMPACT=on` changes what happens at the end of that budget: once history
+passes 75% of it, the oldest turns are replaced with a model-written summary
+instead of being dropped. The system prompt and roughly the last 20% of the
+budget stay verbatim, and a failed summary falls back to the ordinary trim, so
+compaction can never fail a turn that would otherwise have worked.
+
+**It is off by default, and that is deliberate.** Two measured facts:
+
+- Below the budget, compaction only costs you. The summary is a full-price call,
+  and replacing the oldest turns changes the prompt prefix, which invalidates the
+  provider's cache for the rest of the request.
+- At the budget, not compacting is far worse than it looks. Once the hard trim
+  starts evicting from the front *every turn*, the cache prefix changes every
+  turn too, and prompt caching stops working entirely.
+
+In a 60-turn test against DeepSeek, crossing that point cost 2.09M input tokens
+at a 38% cache-hit rate; with compaction it was 1.26M tokens at 94%, about 85%
+less money. Almost all of that came from keeping the session clear of the
+ceiling, not from the tokens the summary saved.
+
+So: turn it on if a session might reach the budget — that is, a long session on
+a model with expensive input, or any session you run with a lowered
+`CODA_MAX_CONTEXT_CHARS`. On a cheap model with short sessions, leave it off.
+
 ## Commands
 
 Slash commands are typed into the input and sent with Enter.
@@ -327,6 +358,8 @@ own is exempt and is sent as ordinary text (e.g. a pasted absolute path).
 | `CODA_SESSIONS_DIR` | `~/.coda/sessions` (also reads the older `DSC_SESSIONS_DIR`) |
 | `CODA_MOUSE` | `on` — set to `off` to leave mouse selection to the terminal (see [Scrolling back](#scrolling-back)) |
 | `CODA_PARALLEL_TOOLS` | `on` — set to `off` to run tool calls strictly in the order the model requested them (see [Parallel tool calls](#parallel-tool-calls)) |
+| `CODA_MAX_CONTEXT_CHARS` | `3200000` — the history budget for one request (~800k tokens). Lower it for a model with a smaller context window |
+| `CODA_COMPACT` | `off` — set to `on` to summarize old turns once history reaches 75% of the budget, instead of letting the hard trim drop them (see [History compaction](#history-compaction)) |
 | `CODA_VISION_MODEL` | the value of `CODA_MODEL` |
 | `CODA_VISION_BASE_URL` | the value of `CODA_BASE_URL` |
 | `CODA_VISION_API_KEY` | the value of `CODA_API_KEY` |

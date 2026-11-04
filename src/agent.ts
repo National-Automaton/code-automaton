@@ -43,6 +43,25 @@ function messageChars(m: ChatCompletionMessageParam): number {
 }
 
 /**
+ * Whether a tool call's `arguments` string is complete, parseable JSON.
+ *
+ * An absent or empty string is valid: a call that takes no arguments may
+ * legitimately send either. Anything that fails to parse is treated as
+ * truncated, which is what a provider cutting a reply off at the output-token
+ * cap produces.
+ */
+export function isValidJson(args: unknown): boolean {
+  if (args === undefined || args === null || args === "") return true;
+  if (typeof args !== "string") return false;
+  try {
+    JSON.parse(args);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Drop the oldest messages until the history fits `maxChars`.
  *
  * The system prompt and the newest message are always kept: the system prompt
@@ -74,6 +93,101 @@ export function trimHistory(
     }
   }
   return keep;
+}
+
+/**
+ * Fraction of the ceiling at which compaction replaces old turns with a
+ * summary. Below this, history is left alone: re-sending it is cheap when the
+ * provider caches the prefix, and the recent turns are usually the ones that
+ * matter.
+ *
+ * Measured against real sessions, history grows ~2.8k tokens/turn, so the
+ * default ceiling is only reached after ~285 turns. That is why compaction is
+ * off by default: for a cheap model it saves cents, and every compaction
+ * discards context and invalidates the provider's cache prefix.
+ */
+export const DEFAULT_COMPACT_AT = 0.75;
+
+/** Fraction of the kept history that stays verbatim after a compaction. */
+const COMPACT_KEEP_FRACTION = 0.2;
+
+/**
+ * Split `messages` at a turn boundary near `splitAt`.
+ *
+ * Returns the messages that would be summarized and the ones kept verbatim.
+ * The system prompt (index 0) always stays. The split never lands between an
+ * `assistant` turn carrying tool_calls and its `tool` results, because most
+ * providers reject an orphaned `tool` message outright.
+ */
+export function splitForCompaction(
+  messages: ChatCompletionMessageParam[],
+  splitAt: number
+): { older: ChatCompletionMessageParam[]; keep: ChatCompletionMessageParam[] } {
+  if (messages.length <= 2) return { older: [], keep: messages };
+
+  let cut = Math.max(1, Math.min(splitAt, messages.length - 1));
+  // Walk backwards to a `user` message: a turn starts there, so the kept tail
+  // begins with a real request rather than a bare tool result.
+  let guard = 0;
+  while (cut > 1 && messages[cut].role !== "user" && guard++ < messages.length) cut--;
+  if (cut <= 1) return { older: [], keep: messages };
+
+  return { older: messages.slice(1, cut), keep: messages.slice(cut) };
+}
+
+/**
+ * Replace the oldest part of the history with a summary message.
+ *
+ * The result is `[system, summary, ...recent]`. The summary is an ordinary
+ * user-role message rather than a fake tool result or a second system message:
+ * several OpenAI-compatible backends reject those shapes mid-array.
+ *
+ * `summarize` is injected so this can be tested without a model call.
+ */
+export async function compactHistory(
+  messages: ChatCompletionMessageParam[],
+  summarize: (older: ChatCompletionMessageParam[]) => Promise<string>,
+  maxChars = MAX_CONTEXT_CHARS,
+  compactAt = DEFAULT_COMPACT_AT
+): Promise<ChatCompletionMessageParam[]> {
+  const total = messages.reduce((n, m) => n + messageChars(m), 0);
+  if (total <= maxChars * compactAt) return messages;
+
+  // Keep roughly the last KEEP_FRACTION of the budget verbatim.
+  const keepChars = Math.floor(maxChars * COMPACT_KEEP_FRACTION);
+  let acc = 0;
+  let splitIndex = messages.length;
+  for (let i = messages.length - 1; i > 0; i--) {
+    acc += messageChars(messages[i]);
+    if (acc > keepChars) {
+      splitIndex = i;
+      break;
+    }
+  }
+
+  const { older, keep } = splitForCompaction(messages, splitIndex);
+  if (older.length === 0) return messages;
+
+  let summary: string;
+  try {
+    summary = (await summarize(older)).trim();
+  } catch {
+    // A failed summary must not break the turn: fall back to the plain trim,
+    // which is the existing behaviour and still prevents overflow.
+    return trimHistory(messages, maxChars);
+  }
+  if (!summary) return trimHistory(messages, maxChars);
+
+  return [
+    messages[0],
+    {
+      role: "user",
+      content:
+        `Summary of earlier work in this session (original messages were ` +
+        `compacted to save context):\n\n${summary}`,
+    },
+    ...keep,
+  ];
 }
 
 /**
@@ -258,6 +372,50 @@ export class Agent {
   }
 
   /**
+   * Summarize the older part of a history that is about to be compacted.
+   *
+   * Deliberately non-streaming: the caller needs the whole string before it can
+   * splice it in, and the reply is not user-visible work in progress. Uses the
+   * plain (non-vision) route -- summarising text needs no image support, and
+   * routing images through here would send them to the vision model for no
+   * reason.
+   */
+  private async summarize(older: ChatCompletionMessageParam[]): Promise<string> {
+    const transcript = older
+      .map((m) => {
+        const any = m as any;
+        const body =
+          typeof any.content === "string"
+            ? any.content
+            : any.content
+              ? JSON.stringify(any.content)
+              : "";
+        const calls = any.tool_calls
+          ? ` [called ${any.tool_calls.map((c: any) => c.function?.name).join(", ")}]`
+          : "";
+        return `${m.role}${calls}: ${body}`;
+      })
+      .join("\n\n");
+
+    const res = await this.client.chat.completions.create({
+      model: this.config.model,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Summarise a coding session transcript so work can continue without " +
+            "it. Preserve: files read or changed and why, decisions made and their " +
+            "reasons, commands run and their outcomes, and anything still " +
+            "outstanding. Drop pleasantries and superseded detail. Be dense and " +
+            "concrete; under 400 words.",
+        },
+        { role: "user", content: transcript },
+      ],
+    });
+    return res.choices[0]?.message?.content ?? "";
+  }
+
+  /**
    * Send user input and stream the model's response through `emit`.
    * Resolves once the model has finished (no more tool calls).
    */
@@ -287,6 +445,22 @@ export class Agent {
         // mid-turn steer lands alongside the tool results rather than after the
         // turn ends.
         for (const text of this.flushSteers()) emit({ type: "steer", text });
+
+        // Compaction runs here, at the top of the loop, so it happens once per
+        // crossing rather than on every round trip. It only triggers once
+        // history passes the threshold, so most turns pay nothing.
+        if (this.config.compact) {
+          const before = this.messages.length;
+          this.messages = await compactHistory(this.messages, (older) =>
+            this.summarize(older)
+          );
+          if (this.messages.length < before) {
+            emit({
+              type: "text",
+              text: `\n[compacted ${before - this.messages.length} earlier messages into a summary]\n`,
+            });
+          }
+        }
 
         const { client, model } = this.route();
         const stream = await this.createWithRetry(client, model, emit);
@@ -325,6 +499,24 @@ export class Agent {
                 toolCalls[idx].function.arguments += tc.function.arguments;
             }
           }
+        }
+
+        // Never commit a call whose arguments were cut off. Providers validate
+        // every tool call in the history on each request, so one truncated
+        // `arguments` string makes every later send fail with a bare "400
+        // invalid argument" -- the session can never be used again. Drop the
+        // damaged call and keep whatever else the turn produced.
+        const goodCalls = toolCalls.filter((c) =>
+          isValidJson(c.function?.arguments)
+        );
+        if (goodCalls.length !== toolCalls.length) {
+          const lost = toolCalls.length - goodCalls.length;
+          emit({
+            type: "text",
+            text: `\n[dropped ${lost} truncated tool call${lost === 1 ? "" : "s"} at the output-token cap]\n`,
+          });
+          toolCalls.length = 0;
+          toolCalls.push(...goodCalls);
         }
 
         const assistantMsg: ChatCompletionMessageParam = {
