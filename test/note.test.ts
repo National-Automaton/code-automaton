@@ -35,7 +35,7 @@ process.env.OPENAI_API_KEY ||= "sk-test-placeholder";
 
 const { Session } = await import("../src/session.js");
 type Session = InstanceType<typeof Session>;
-const { loadAll } = await import("../src/store.js");
+const { loadAll, DEFAULT_TITLE } = await import("../src/store.js");
 
 const cfg = { compact: false, mouse: false } as unknown as Config;
 
@@ -112,6 +112,52 @@ async function main() {
   const running = new Session(cfg);
   running.status = "thinking";
   assert.ok(survives(running, new Set()), "a session mid-turn is kept");
+
+  // --- a session named before its first message keeps the name ------------
+  //
+  // The startup session is ephemeral: it exists to give a fresh terminal
+  // somewhere to type, and is only written once it has entries. Renaming it
+  // was applied in memory and then dropped by `persist`'s early return, so the
+  // name disappeared as soon as the session was reopened -- it looked as
+  // though renaming a fresh session simply did nothing.
+
+  const named = new Session(cfg);
+  assert.equal(named.entries.length, 0, "the session is still empty");
+  await named.rename("Spend report follow-up");
+  assert.equal(named.title, "Spend report follow-up", "the title is applied");
+  assert.equal(named.persisted, true, "naming a session persists it");
+  assert.ok((await diskIds()).has(named.id), "the named session has a file");
+
+  const reloadedNamed = (await loadAll()).find((r) => r.id === named.id);
+  assert.equal(
+    reloadedNamed?.title,
+    "Spend report follow-up",
+    "the name survives a reload -- this is what used to be lost"
+  );
+
+  // An untouched session still writes nothing: the patience of the early
+  // return is the reason `~/.coda/sessions` does not fill with empty shells.
+  const untouched = new Session(cfg);
+  await untouched.persist();
+  assert.equal(untouched.persisted, false, "an untouched session is not persisted");
+  assert.ok(!(await diskIds()).has(untouched.id), "an untouched session writes no file");
+
+  // Clearing the name back to the default re-arms auto-titling, so the session
+  // is once more unsaved-but-harmless and the next message names it.
+  const cleared = new Session(cfg);
+  await cleared.rename("temporary");
+  await cleared.rename("");
+  assert.equal(cleared.title, DEFAULT_TITLE, "an empty rename restores the default title");
+  assert.equal(cleared.persisted, true, "it stays persisted once written");
+  // The record on disk has to follow the in-memory title. Stopping at the
+  // "nothing to save" guard once the name was back to the default left the old
+  // name in the file while this session said something different.
+  const reloadedCleared = (await loadAll()).find((r) => r.id === cleared.id);
+  assert.equal(
+    reloadedCleared?.title,
+    DEFAULT_TITLE,
+    "clearing the name must update the file, not leave the old one behind"
+  );
 
   rmSync(dir, { recursive: true, force: true });
   console.log("session-note: ok");

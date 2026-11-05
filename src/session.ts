@@ -262,8 +262,18 @@ export class Session {
   }
 
   async persist(): Promise<void> {
-    // Nothing to save for a brand-new, untouched session.
-    if (this.entries.length === 0) return;
+    // Nothing to save for a brand-new, untouched session -- unless it has been
+    // named. A title is a deliberate act and has to outlive the terminal it was
+    // typed in, so a session renamed before its first message is written on that
+    // basis alone. Without this the rename was applied in memory and dropped by
+    // the early return here, so the name vanished the moment the session was
+    // reopened; it looked as though renaming a fresh session did nothing.
+    //
+    // Once written the record is kept up to date rather than abandoned: clearing
+    // the name back to the default re-arms auto-titling (`rename`), and if the
+    // guard stopped here the file on disk would still hold the old name while
+    // this copy said otherwise.
+    if (this.entries.length === 0 && this.title === DEFAULT_TITLE && !this.persisted) return;
     await save(this.toRecord());
     this.persisted = true;
   }
