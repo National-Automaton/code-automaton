@@ -47,7 +47,13 @@ jobs:
   stage:
     runs-on: ubuntu-latest
     steps:
+      # Full history and tags: the release notes are generated against the
+      # previous tag, which `git describe --tags` cannot see in the default
+      # single-commit checkout -- it would silently fall back to no range and
+      # list every PR ever merged.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v7
         with:
@@ -149,10 +155,62 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # The body is built here rather than by `gh release create
+          # --generate-notes` for two reasons, both of which needed a manual
+          # edit on every past release:
+          #
+          #   - `--notes` is prepended to the generated body, so the staging
+          #     instructions ("Approve it in the npm web UI...") were published
+          #     on the release page. They are for whoever cuts the release and
+          #     are emitted as a run annotation by the step below instead.
+          #
+          #   - The generated range starts at the previous tag, and the previous
+          #     release's own version-bump PR merges *after* that tag. So every
+          #     release listed the last one: 1.9.0's notes began
+          #     "1.8.0 by @... in #38", and 1.10.0's would begin "1.9.0 ... #41".
+          #
+          # A bump PR is titled with just the version number, which makes it
+          # identifiable and safe to drop: a normal PR says what it changes.
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo "")
+          if [ -n "$PREVIOUS_TAG" ]; then
+            BODY=$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="${GITHUB_REF_NAME}" \
+              -f previous_tag_name="${PREVIOUS_TAG}" \
+              --jq .body)
+          else
+            BODY=$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="${GITHUB_REF_NAME}" \
+              --jq .body)
+          fi
+
+          # Drop the version-bump bullets. A generated bullet looks like
+          #   * 1.9.0 by @user in https://github.com/o/r/pull/41
+          # so the title is matched between "* " and " by @".
+          BODY=$(printf '%s\n' "$BODY" \
+            | grep -vE '^\* [0-9]+\.[0-9]+\.[0-9]+ by @' || true)
+
+          # Trim the blank lines the removal leaves behind.
+          BODY=$(printf '%s\n' "$BODY" | sed '/./,$!d')
+
+          # State plainly where the package lives. Dropping the old sentence was
+          # an overcorrection: the problem was never mentioning npm, it was the
+          # instructional tone aimed at whoever cut the release ("Approve it in
+          # the npm web UI", "mark this release Latest with gh release edit ...").
+          # Those are emitted as a run annotation below; this line is for readers.
+          PKG_NAME=$(node -p "require('./package.json').name")
+          NPM_NOTE=$(printf '_Published on npm as `%s@%s`._' "$PKG_NAME" "${GITHUB_REF_NAME#v}")
+
+          # The note goes straight after the heading so it reads first, rather
+          # than trailing the changelog where it would be missed.
+          # `sed 1a` inserts after the heading line; the blank line that follows
+          # keeps the note clear of the first changelog entry.
+          printf '%s\n' "$BODY" \
+            | sed "1a\\\n${NPM_NOTE}\\n" \
+            > /tmp/release-notes.md
+
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            --notes "Staged on npm. Approve it in the npm web UI (account -> Staged packages), then mark this release Latest with gh release edit ${GITHUB_REF_NAME} --latest." \
+            --notes-file /tmp/release-notes.md \
             --latest=false
 
       - name: Note that approval is manual
