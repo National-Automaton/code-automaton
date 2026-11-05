@@ -39,6 +39,20 @@ const ERASE_LINE = ESC + "K";
 const MOUSE_ON = ESC + "?1000h" + ESC + "?1006h";
 const MOUSE_OFF = ESC + "?1006l" + ESC + "?1000l";
 /**
+ * Bracketed paste.
+ *
+ * With this on, the terminal wraps pasted text in `ESC[200~` ... `ESC[201~`,
+ * which is the only way to tell a pasted newline from a typed Enter. Without
+ * it, pasting the source of an email submitted it one line at a time: ninety
+ * separate messages, each a fragment, with words split across them where the
+ * terminal had wrapped the line.
+ *
+ * It is not tied to the mouse: pasting has to work whether or not mouse
+ * reporting is enabled.
+ */
+const PASTE_ON = ESC + "?2004h";
+const PASTE_OFF = ESC + "?2004l";
+/**
  * Nothing to write: mouse reporting stays off. The terminal keeps its own
  * drag-to-select and wheel scrollback, and coda receives no wheel events.
  * Selected with CODA_MOUSE=off for users who would rather select text.
@@ -363,7 +377,7 @@ export class Screen {
 
   start(): void {
     stdout.on("resize", this.resizeHandler);
-    stdout.write(CLEAR + HIDE_CURSOR + (this.mouse ? MOUSE_ON : NO_MOUSE));
+    stdout.write(CLEAR + HIDE_CURSOR + PASTE_ON + (this.mouse ? MOUSE_ON : NO_MOUSE));
   }
 
   stop(): void {
@@ -374,7 +388,7 @@ export class Screen {
     // (and in the terminal's scrollback) after exit. Only emit the "off"
     // escape when we turned it on, so a shell running under coda never gets a
     // stray mode change.
-    stdout.write((this.mouse ? MOUSE_OFF : "") + RESET + SHOW_CURSOR + "\n");
+    stdout.write((this.mouse ? MOUSE_OFF : "") + PASTE_OFF + RESET + SHOW_CURSOR + "\n");
   }
 
   /**

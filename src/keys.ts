@@ -33,8 +33,32 @@ function ctrlLetter(byte: number): string | null {
   return null;
 }
 
+/**
+ * Largest paste held before it is flushed unterminated.
+ *
+ * A bracketed paste is read until its `ESC[201~` terminator arrives. If that
+ * marker is ever lost -- a dropped write, a terminal that truncates -- waiting
+ * for it means every later keypress is appended to the paste buffer and the
+ * interface stops responding, with no way out but Ctrl+C. Beyond this size the
+ * text collected so far is emitted as a paste and reading resumes, so the worst
+ * case is a paste that arrives early rather than a frozen terminal.
+ */
+const MAX_PASTE_CHARS = 8_000_000;
+
 export class KeyReader {
   private buf = "";
+  /**
+   * True once `ESC[200~` has been seen and the matching `ESC[201~` has not.
+   *
+   * This is held across `feed()` calls rather than re-derived from `buf`: a
+   * paste larger than one read() from the terminal arrives in several chunks,
+   * and re-parsing from the start of the buffer each time lost the framing --
+   * a 50KB paste in 8KB chunks came through as 50,000 individual keystrokes
+   * instead of one paste.
+   */
+  private pasting = false;
+  /** Text collected for an in-progress bracketed paste. */
+  private pasteBuf = "";
   private handlers: ((k: Key) => void)[] = [];
   private dataHandler = (chunk: Buffer) => this.feed(chunk.toString("utf8"));
 
@@ -62,6 +86,34 @@ export class KeyReader {
   private feed(s: string): void {
     this.buf += s;
     while (this.buf.length > 0) {
+      if (this.pasting) {
+        // Inside a paste: look only for the terminator, in everything received
+        // so far. One chunk is not the unit that matters -- the terminator may
+        // straddle two of them, and flushing each chunk into `pasteBuf` before
+        // searching meant the split marker was appended verbatim and never
+        // found, so the paste never ended.
+        this.pasteBuf += this.buf;
+        this.buf = "";
+        const end = this.pasteBuf.indexOf("\x1b[201~");
+        if (end === -1) {
+          // No terminator yet. Hold what we have -- unless the paste has grown
+          // absurdly large, in which case the marker is never coming and
+          // holding on would wedge the reader.
+          if (this.pasteBuf.length >= MAX_PASTE_CHARS) {
+            const text = this.pasteBuf;
+            this.pasteBuf = "";
+            this.pasting = false;
+            this.emit({ type: "paste", text });
+          }
+          return;
+        }
+        const text = this.pasteBuf.slice(0, end);
+        this.buf = this.pasteBuf.slice(end + 6);
+        this.pasteBuf = "";
+        this.pasting = false;
+        this.emit({ type: "paste", text });
+        continue;
+      }
       const consumed = this.parseOne();
       if (!consumed) break; // wait for the rest of a multi-byte sequence
     }
@@ -105,12 +157,9 @@ export class KeyReader {
           return true;
         }
         if (params === "200") {
-          // Bracketed paste start: swallow until the end marker.
-          const end = this.buf.indexOf("\x1b[201~");
-          if (end === -1) return false;
-          const text = this.buf.slice(0, end);
-          this.buf = this.buf.slice(end + 6);
-          this.emit({ type: "paste", text });
+          // Bracketed paste start. `feed` reads the body from here, across as
+          // many chunks as it takes, until the terminator or the size cap.
+          this.pasting = true;
           return true;
         }
         switch (final) {
