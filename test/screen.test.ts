@@ -713,4 +713,72 @@ for (const size of [
   );
 }
 
+// ---- Scrolling while a reply is still being written ---------------------
+//
+// `scrollOffset` counts lines back from the *end* of the transcript, so content
+// arriving below it moves the view: each appended line leaves the same offset
+// pointing one line further on. Reading old context during a long turn meant
+// being walked back to the bottom, one line at a time.
+//
+// `scrollTop` anchors to a line index from the top instead, which appended
+// content cannot move. These cases pin that, and pin that an unattended view
+// still follows the tail.
+{
+  const size = { cols: 80, rows: 24 };
+  const strip2 = (r: string) => strip(r).trim();
+  const firstText = (f: Frame): string =>
+    f.rows.map(strip2).find((r) => /^line \d+|^new \d+/.test(r)) ?? "";
+
+  const long = Array.from({ length: 60 }, (_, i) => ({
+    role: "assistant" as const,
+    text: `line ${i}`,
+  }));
+  const grow = (n: number): Entry[] => [
+    ...long,
+    ...Array.from({ length: n }, (_, i) => ({ role: "assistant" as const, text: `new ${i}` })),
+  ];
+  const at = (entries: Entry[], scrollTop: number) => ({
+    ...chatState("", 0),
+    entries,
+    scrollTop,
+  });
+
+  // Establish the line count, then anchor 20 lines back from the tail.
+  const screen = screenAt(size.cols, size.rows);
+  renderAt(size.cols, size.rows, screen, at(long, -1));
+  const total = screen.totalLines;
+  const anchor = total - 20;
+  const before = firstText(renderAt(size.cols, size.rows, screen, at(long, anchor)));
+
+  for (const extra of [1, 5, 20, 40]) {
+    const frame = renderAt(size.cols, size.rows, screen, at(grow(extra), anchor));
+    checkFrame(frame, size, `anchored scroll, +${extra} lines`);
+    assert.equal(
+      firstText(frame),
+      before,
+      `+${extra} lines moved the view: ${JSON.stringify(firstText(frame))} was ${JSON.stringify(before)}`
+    );
+  }
+
+  // An unattended view (anchor -1) still follows the tail.
+  const tail = renderAt(size.cols, size.rows, screen, at(grow(40), -1));
+  assert.ok(
+    firstText(tail) !== before,
+    "with no anchor the view should have followed the new content"
+  );
+  assert.ok(
+    /new \d+/.test(strip2(tail.rows.join("\n"))),
+    "following the tail should show the newest lines"
+  );
+
+  // The anchor is a line index, so moving it by one moves the view by one --
+  // and it means the same thing no matter how much content has arrived.
+  const shifted = renderAt(size.cols, size.rows, screen, at(grow(40), anchor - 3));
+  assert.notEqual(
+    firstText(shifted),
+    before,
+    "moving the anchor should move the view"
+  );
+}
+
 process.stderr.write("screen: all frame invariants hold\n");

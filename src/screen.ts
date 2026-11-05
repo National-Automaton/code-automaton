@@ -133,6 +133,17 @@ export interface RenderState {
    */
   scrollOffset: number;
   /**
+   * First transcript line to draw, counted from the top; -1 (or undefined)
+   * follows the tail.
+   *
+   * Takes precedence over `scrollOffset`. An offset from the tail moves when a
+   * reply appends a line -- each new line pushes the anchored text one line
+   * further up -- so a turn still being written dragged a reader out of the
+   * history and back to the bottom. A line index from the top is unaffected by
+   * content arriving below it.
+   */
+  scrollTop?: number;
+  /**
    * When set, the session picker is shown full-screen: the transcript and the
    * input line are not drawn at all. `query` is the typed text; when non-empty,
    * Enter starts a new session using it. It does not filter the list.
@@ -218,6 +229,14 @@ export class Screen {
   /** Rows actually visible for the transcript in the last render. */
   private lastViewportRows = 0;
   /**
+   * The offset actually drawn last frame, after clamping.
+   *
+   * The caller keeps its own anchored position (a line index from the top) and
+   * converts it back to an offset each frame; it needs to know what was really
+   * shown so a resize or a clamp does not silently desynchronise the two.
+   */
+  private lastOffset = 0;
+  /**
    * Rows the help block was drawn in last frame, 0 when it was not shown.
    *
    * Scrolling the block needs its height, and that height is worked out inside
@@ -264,6 +283,11 @@ export class Screen {
   /** Number of transcript lines available to scroll through. */
   get totalLines(): number {
     return this.lastTotalLines;
+  }
+
+  /** Lines back from the tail that the last frame actually drew. */
+  get scrollOffset(): number {
+    return this.lastOffset;
   }
 
   /**
@@ -539,8 +563,23 @@ export class Screen {
     this.lastViewportRows = viewport;
 
     // Scroll: 0 follows the tail; otherwise look `scrollOffset` lines back.
+    //
+    // `scrollOffset` counts back from the *end*, so a reply still being written
+    // moves whatever it is holding: each appended line leaves the same offset
+    // pointing one line further on, and a long stream drags the view to the
+    // bottom while the reader is up in the history. The caller anchors instead
+    // -- `scrollTop` names the first line to draw by its index from the start,
+    // which does not move when content is added below it. See `App.scroll`.
     const maxOffset = Math.max(0, all.length - viewport);
-    const offset = Math.max(0, Math.min(s.scrollOffset, maxOffset));
+    // An anchored line index wins: it is converted to an offset against the
+    // length this frame actually has, which is the one thing the caller cannot
+    // know when it asks for the frame.
+    const requested =
+      s.scrollTop !== undefined && s.scrollTop >= 0
+        ? Math.max(0, all.length - s.scrollTop)
+        : s.scrollOffset;
+    const offset = Math.max(0, Math.min(requested, maxOffset));
+    this.lastOffset = offset;
     const endIdx = all.length - offset;
     const startIdx = Math.max(0, endIdx - viewport);
     const visible = all.slice(startIdx, Math.max(startIdx, endIdx));

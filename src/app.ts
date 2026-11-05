@@ -72,8 +72,24 @@ export class App {
    * the one whose title you were editing.
    */
   private rename: { id: string; buffer: LineBuffer; fromPicker: boolean } | null = null;
-  /** Lines scrolled back from the tail of the transcript. */
+  /**
+   * Lines scrolled back from the tail of the transcript.
+   *
+   * Kept for the key handling, which thinks in "lines back". The *view* is not
+   * anchored to this value: an offset from the tail moves whenever a reply
+   * appends a line, so a turn still being written dragged the reader back to
+   * the bottom. `scrollTop` holds the position instead, and this is recomputed
+   * from it before each frame.
+   */
   private scroll = 0;
+  /**
+   * First transcript line to draw, counted from the top; -1 follows the tail.
+   *
+   * Anchoring to a line index rather than a distance from the end is what lets
+   * someone read old context while the model is still writing: new lines land
+   * below the anchor and the view stays where it was.
+   */
+  private scrollTop = -1;
   private screen: Screen;
   private keys = new KeyReader();
   private quitting = false;
@@ -195,6 +211,10 @@ export class App {
       sessionIndex: Math.max(0, pickerList.findIndex((s) => s.id === this.activeId)),
       sessionCount: this.sessions.length,
       scrollOffset: this.scroll,
+      // The anchor is passed as a line index, not an offset: only the renderer
+      // knows how long the transcript is this frame, and a reply still being
+      // written changes that between frames.
+      scrollTop: this.scrollTop,
       picker: this.picker
         ? {
             items,
@@ -599,7 +619,7 @@ export class App {
     if (leaving) void leaving.release();
     this.claimActive();
     this.input.clear();
-    this.scroll = 0;
+    this.scrollToTail();
     if (session.status === "idle") {
       void session.run(text, () => this.requestRender(), images);
     }
@@ -672,7 +692,7 @@ export class App {
     const leaving = this.current();
     this.setActive(session);
     this.input.clear();
-    this.scroll = 0;
+    this.scrollToTail();
     this.requestRender();
 
     const res = await session.acquire();
@@ -772,7 +792,7 @@ export class App {
         // what the status bar hint has always promised. Otherwise it is the
         // ordinary end-of-line key.
         if (this.scroll > 0) {
-          this.scroll = 0;
+          this.scrollToTail();
           this.requestRender();
           return;
         }
@@ -924,13 +944,30 @@ export class App {
     this.requestRender();
   }
 
-  /** Scroll the transcript by `delta` lines (positive = back in history). */
+  /**
+   * Return the view to the tail of the transcript.
+   *
+   * Clears the anchored line index as well as the offset: the two are kept in
+   * step by hand, and leaving a stale anchor behind pins the view in history
+   * after an action that was meant to bring it back.
+   */
+  private scrollToTail(): void {
+    this.scroll = 0;
+    this.scrollTop = -1;
+  }
+
   private scrollBy(delta: number): void {
-    const maxOffset = Math.max(
-      0,
-      this.screen.totalLines - this.screen.viewportRowsForInput(this.input.value)
-    );
-    this.scroll = Math.max(0, Math.min(this.scroll + delta, maxOffset));
+    const lines = this.screen.totalLines;
+    const maxOffset = Math.max(0, lines - this.screen.viewportRowsForInput(this.input.value));
+    // While anchored, `scroll` is only a record of the last offset and goes
+    // stale as a reply appends lines -- the anchor is the source of truth. Work
+    // from the frame that was actually drawn so one keypress moves one line,
+    // whatever has arrived since the reader last scrolled.
+    const from = this.scrollTop >= 0 ? Math.max(0, lines - this.scrollTop) : this.scroll;
+    this.scroll = Math.max(0, Math.min(from + delta, maxOffset));
+    // Scrolling is the moment the reader picks a position, so the anchor is
+    // recomputed from the offset just chosen.
+    this.scrollTop = this.scroll === 0 ? -1 : Math.max(0, lines - this.scroll);
     this.requestRender();
   }
 
@@ -1095,14 +1132,14 @@ export class App {
     if (leaving) void leaving.release();
     this.claimActive();
     this.input.clear();
-    this.scroll = 0;
+    this.scrollToTail();
     this.requestRender();
   }
 
   private closeActive(): void {
     this.closeSession(this.current());
     this.input.clear();
-    this.scroll = 0;
+    this.scrollToTail();
     this.requestRender();
   }
 
@@ -1144,7 +1181,7 @@ export class App {
       // running tools is only moments away.
       session.steer(text);
       this.input.clear();
-      this.scroll = 0;
+      this.scrollToTail();
       this.requestRender();
       return;
     }
@@ -1161,7 +1198,7 @@ export class App {
       this.startNewSessionWith(text, images);
     } else {
       this.input.clear();
-      this.scroll = 0; // jump back to the tail so you see the reply
+      this.scrollToTail(); // jump back to the tail so you see the reply
       void session.run(text, () => this.requestRender(), images);
     }
     this.requestRender();
