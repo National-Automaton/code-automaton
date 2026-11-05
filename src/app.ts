@@ -51,7 +51,14 @@ export class App {
   private activeId: string | null = null;
   private input = new LineBuffer();
   /** Picker state: highlighted row and the "start a new session" field. */
-  private picker: { index: number; query: LineBuffer } | null = null;
+  private picker: {
+    index: number;
+    query: LineBuffer;
+    /** Help reference shown over the list, or null. See `showPickerHelp`. */
+    help: string[] | null;
+    /** First help line drawn; the block scrolls while it is open. */
+    helpTop: number;
+  } | null = null;
   /**
    * Title editor, non-null while a session's title is being edited (Alt+R).
    * It holds the target session and the edit buffer, which starts pre-filled
@@ -205,6 +212,8 @@ export class App {
                 ? this.rename.buffer.cursor
                 : this.picker.query.cursor,
             renaming: !!(this.rename && this.rename.fromPicker),
+            help: this.picker.help,
+            helpTop: this.picker.helpTop,
           }
         : null,
       rename:
@@ -344,6 +353,26 @@ export class App {
     this.requestRender();
   }
 
+  /**
+   * Move the help block by `delta` lines, clamped to the block's ends.
+   *
+   * The visible height comes from the screen, which has just drawn the block:
+   * scrolling past the end would otherwise leave the last screenful blank, and
+   * a silent no-op at the bottom is clearer than either.
+   */
+  private scrollPickerHelp(delta: number): void {
+    const p = this.picker;
+    if (!p?.help) return;
+    const visible = this.screen.helpRows;
+    const maxTop = Math.max(0, p.help.length - Math.max(1, visible));
+    p.helpTop = Math.max(0, Math.min(p.helpTop + delta, maxTop));
+  }
+
+  /** Lines per page press in the help block; at least one. */
+  private pickerHelpPage(): number {
+    return Math.max(1, this.screen.helpRows - 1);
+  }
+
   private onPickerKey(k: Key): void {
     const p = this.picker!;
     const items = this.pickerSessions();
@@ -356,16 +385,30 @@ export class App {
       // (or Down at the bottom) and the highlight reappears on a row you did
       // not move to, so Enter opens something else. Stopping dead at the end
       // makes it obvious you have reached it.
+      // While the help block is open the arrows scroll it rather than the
+      // list: the block is what the reader is looking at, and moving the
+      // highlight underneath it would change what Enter opens behind their
+      // back. Esc closes the block and gives the keys back to the list.
       case "up":
-        if (n > 0) p.index = Math.max(0, p.index - 1);
+        if (p.help) this.scrollPickerHelp(-1);
+        else if (n > 0) p.index = Math.max(0, p.index - 1);
         this.requestRender();
         return;
       case "down":
-        if (n > 0) p.index = Math.min(n - 1, p.index + 1);
+        if (p.help) this.scrollPickerHelp(1);
+        else if (n > 0) p.index = Math.min(n - 1, p.index + 1);
         this.requestRender();
         return;
       case "escape":
-        this.picker = null;
+        // With the help reference open, Esc dismisses the help and returns to
+        // the list rather than closing the picker: opening help was a detour
+        // from picking a session, so the way back is to the list. A second Esc
+        // then closes the picker as usual.
+        if (p.help) {
+          p.help = null;
+        } else {
+          this.picker = null;
+        }
         this.requestRender();
         return;
       case "left":
@@ -376,12 +419,16 @@ export class App {
         q.right();
         this.requestRender();
         return;
+      // Home/End jump the help block to its ends while it is open; otherwise
+      // they move within the entry line, as before.
       case "home":
-        q.home();
+        if (p.help) p.helpTop = 0;
+        else q.home();
         this.requestRender();
         return;
       case "end":
-        q.end();
+        if (p.help) this.scrollPickerHelp(Number.MAX_SAFE_INTEGER);
+        else q.end();
         this.requestRender();
         return;
       case "backspace":
@@ -405,9 +452,13 @@ export class App {
           // A command that did not run (an unknown one) leaves the picker
           // open, so the message is still on screen and can be corrected
           // instead of disappearing along with the overlay.
+          // A command may decide the overlay should stay up (`/help` shows its
+          // reference over the list), in which case `runSlashCommand` has left a
+          // non-null `picker` holding the state to redraw, and the query has
+          // already been cleared.
           const ran = this.runSlashCommand(text, true);
           if (ran) {
-            this.picker = null;
+            if (!this.picker?.help) this.picker = null;
             q.clear();
           } else {
             q.home();
@@ -438,7 +489,7 @@ export class App {
           this.picker = null;
           void this.openSession(target).then((opened) => {
             if (!opened) {
-              this.picker = { index: p.index, query: p.query };
+              this.picker = { index: p.index, query: p.query, help: p.help, helpTop: p.helpTop };
               this.requestRender();
             }
           });
@@ -508,9 +559,18 @@ export class App {
         else if (k.ch === "v") void this.pasteImageFromClipboard();
         return;
       default:
-        // Scroll keys keep working over the overlay: the transcript is still
-        // drawn above the picker, and a wheel notch or PgUp while the list is
-        // open should move it rather than doing nothing at all.
+        // Scroll keys reach the help block when it is open, and otherwise keep
+        // working over the overlay: the transcript is still drawn above the
+        // picker, and a wheel notch or PgUp while the list is open should move
+        // it rather than doing nothing at all.
+        if (p.help) {
+          if (k.type === "pageup") this.scrollPickerHelp(-this.pickerHelpPage());
+          else if (k.type === "pagedown") this.scrollPickerHelp(this.pickerHelpPage());
+          else if (k.type === "wheel") this.scrollPickerHelp(k.direction * 3);
+          else return;
+          this.requestRender();
+          return;
+        }
         if (k.type === "pageup") this.scrollPage(1);
         else if (k.type === "pagedown") this.scrollPage(-1);
         else if (k.type === "wheel") this.scrollBy(k.direction * 3);
@@ -815,9 +875,9 @@ export class App {
   }
 
   /** Print the command reference into the transcript. */
-  private showHelp(): void {
-    this.systemNote(
-      [
+  /** The command and key reference, shared by `/help` and the picker overlay. */
+  private helpLines(): string[] {
+    return [
         "Commands:",
         "  /help, /?           Show this list",
         "  /quit, /exit        Exit and save sessions (same as quit / exit, or Ctrl+C)",
@@ -835,8 +895,11 @@ export class App {
         "  Ctrl+V              Attach a clipboard image (image-only clipboard)",
         "  ↑ / ↓  PgUp / PgDn  Scroll transcript · End returns to the newest output",
         "  Ctrl+C              Exit",
-      ].join("\n")
-    );
+    ];
+  }
+
+  private showHelp(): void {
+    this.systemNote(this.helpLines().join("\n"));
   }
 
   /**
@@ -886,6 +949,8 @@ export class App {
     this.picker = {
       index: Math.max(0, idx),
       query: new LineBuffer(),
+      help: null,
+      helpTop: 0,
     };
     // A reopened picker starts at the top of the list; the window otherwise
     // keeps wherever the last one was scrolled to.
@@ -943,10 +1008,12 @@ export class App {
       : undefined;
 
     // Drop sessions that vanished from disk, keeping any that are mid-turn.
-    // pruneEmptySessions keeps placeholders that have no file at all, so those
-    // (never persisted, so never in `onDisk`) must survive too.
+    // A session this terminal has never managed to save has no file yet, so it
+    // is absent from `onDisk` for a reason that is not deletion and must
+    // survive -- testing "has no entries" used to stand in for that, until a
+    // note from `/help` gave a fresh session an entry and it was dropped.
     const kept = this.sessions.filter(
-      (s) => onDisk.has(s.id) || s.status === "thinking" || s.entries.length === 0
+      (s) => onDisk.has(s.id) || s.status === "thinking" || !s.persisted
     );
     const removedCount = this.sessions.length - kept.length;
     if (removedCount > 0) {
@@ -1118,9 +1185,19 @@ export class App {
     // `/paste` pulls an image straight off the Windows clipboard. Windows
     // Terminal cannot hand image data to a program through the paste stream,
     // so the clipboard is read from the Windows side instead.
+    // `/help` asked from the picker is shown over the list rather than closing
+    // it: the reason for opening the picker (finding a session) is still live,
+    // and dropping the overlay lost the highlighted row. From the chat input it
+    // still lands in the transcript.
     if (text === "/help" || text === "/?") {
       clrInput();
-      this.showHelp();
+      if (fromPicker && this.picker) {
+        this.picker.help = this.helpLines();
+        this.picker.helpTop = 0;
+        this.picker.query.clear();
+      } else {
+        this.showHelp();
+      }
       return true;
     }
     if (text === "/paste") {

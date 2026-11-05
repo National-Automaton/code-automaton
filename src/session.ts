@@ -66,6 +66,19 @@ export class Session {
    * picker list does not lock it away from other terminals.
    */
   private lock: SessionLock | null = null;
+  /**
+   * Whether this session has ever been written to disk.
+   *
+   * A brand-new session is not, so it is absent from `loadAll()` -- and the
+   * picker's disk reconcile has to keep it regardless of what is in its
+   * transcript. It used to test `entries.length === 0` to spot such a
+   * placeholder, but anything that writes a note into a fresh session (a
+   * `/help` listing, `/image` feedback) gives it an entry, at which point the
+   * reconcile read it as "deleted in another terminal" and dropped the session
+   * the user was typing into. Loaded records and saved sessions count as
+   * persisted, so only genuinely new ones are exempt.
+   */
+  persisted: boolean;
 
   constructor(
     private config: Config,
@@ -77,6 +90,7 @@ export class Session {
     this.createdAt = rec?.createdAt ?? Date.now();
     this.updatedAt = rec?.updatedAt ?? Date.now();
     this.title = rec?.title ?? DEFAULT_TITLE;
+    this.persisted = rec !== undefined;
     this.agent = new Agent(config, rec?.messages);
   }
 
@@ -251,6 +265,7 @@ export class Session {
     // Nothing to save for a brand-new, untouched session.
     if (this.entries.length === 0) return;
     await save(this.toRecord());
+    this.persisted = true;
   }
 
   async delete(): Promise<void> {
