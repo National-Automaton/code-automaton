@@ -68,6 +68,15 @@ jobs:
       # that does not match the tag.
       - run: npm ci
 
+      # The tag is cut from whatever `main` the releaser has locally, which is
+      # not necessarily the one CI saw -- pushing from a stale checkout stages a
+      # commit whose tests were never run. Repeat the gates here so the tag is
+      # refused rather than the tarball being wrong.
+      - name: Typecheck and test
+        run: |
+          npm run typecheck
+          npm test
+
       # Guard against staging a tag that does not match package.json: the tag is
       # the source of truth for what users will download.
       - name: Verify tag matches package.json

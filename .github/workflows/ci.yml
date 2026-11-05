@@ -1,0 +1,41 @@
+name: CI
+
+# Pull requests had no automated checks at all: the only workflow was
+# `release.yml`, which runs on a `v*` tag and stages the package. Nothing
+# exercised the test suite or the type checker before a merge, so a broken
+# build could reach a release tag without anything objecting.
+#
+# `npm test` alone is not enough. It runs the suites through `tsx`, which strips
+# types without checking them, so a type error in `src/` or in `test/` passes
+# the tests and only surfaces later -- either in `npm run build` (which checks
+# `tsconfig.json`) or, for `test/`, not at all. `npm run typecheck` is the only
+# step that covers both projects, so it is run as well.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci` runs the `prepare` script, which builds `dist/`. The suites do
+      # not need it, but building here means a compile error fails the job at
+      # the same point it would fail for a release.
+      - run: npm ci
+
+      # Both projects: `tsconfig.json` for src and `tsconfig.test.json` for the
+      # tests. CI previously ran neither.
+      - run: npm run typecheck
+
+      - run: npm test
