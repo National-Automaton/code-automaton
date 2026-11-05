@@ -135,6 +135,14 @@ export interface RenderState {
     cursor: number;
     /** True while the highlighted session's title is being edited here. */
     renaming: boolean;
+    /**
+     * Help lines to show over the bottom of the list, or null. `/help` typed
+     * into the picker shows them here instead of closing the overlay, so the
+     * list and the highlighted row stay put while the reference is read.
+     */
+    help: string[] | null;
+    /** First help line to draw: the block scrolls within its rows. */
+    helpTop: number;
   } | null;
   /**
    * Set while a session's title is being edited from the chat view (Alt+R).
@@ -195,6 +203,15 @@ export class Screen {
   private lastTotalLines = 0;
   /** Rows actually visible for the transcript in the last render. */
   private lastViewportRows = 0;
+  /**
+   * Rows the help block was drawn in last frame, 0 when it was not shown.
+   *
+   * Scrolling the block needs its height, and that height is worked out inside
+   * `renderPicker` from the row budget. Recording it here keeps the two in step
+   * -- recomputing it in the caller would be a second copy of the layout maths,
+   * free to drift from the one that actually decides what is on screen.
+   */
+  private lastHelpRows = 0;
   /**
    * First list row the picker window currently shows.
    *
@@ -260,6 +277,10 @@ export class Screen {
    * Callers clamping a scroll offset should prefer `viewportRowsForInput()`:
    * this value describes the frame already drawn, not the one about to be.
    */
+  get helpRows(): number {
+    return this.lastHelpRows;
+  }
+
   get viewportRows(): number {
     if (this.lastViewportRows > 0) return this.lastViewportRows;
     // header(1) + blank(1) + blank(1) + input(1) + status(1)
@@ -537,6 +558,9 @@ export class Screen {
     // Content lines only -- CLEAR is written separately before them, so it
     // cannot shift the frame down by one row.
     const out: string[] = [];
+    // Only a picker frame draws a help block; clear the remembered height so a
+    // chat frame cannot let a stale value drive scrolling.
+    if (!s.picker) this.lastHelpRows = 0;
     // Every row starts from the left margin: the picker paints over the whole
     // terminal, so rows after one left short (the header, say) must not inherit
     // a column from where the previous row ended.
@@ -651,11 +675,8 @@ export class Screen {
     const queryRows = wrapHard(p.query, queryWidth);
     // The generic hint gains a locked-row note when there is one to explain:
     // without it, "open in pid 841" reads as a fact with no remedy.
-    const hint = p.renaming
-      ? "rename · Enter save · Esc cancel · empty resets to auto-title"
-      : "↑/↓ pick · Enter " +
-        (p.query ? "start new session" : "open session") +
-        " · type to start a new session · Ctrl+X delete · Alt+R rename";
+    // Built below, once the help block's row budget is known: whether the block
+    // is on screen decides whether the hint should describe scrolling it.
 
     // Rows left for the list: the terminal, less the header and its blank row,
     // less the three fixed rows below the list (rule, entry field, rule) and
@@ -664,7 +685,39 @@ export class Screen {
     // The heading is only worth a row when a session row fits under it too --
     // on a very short terminal the list matters more than its title.
     const headingRows = height >= 8 ? 1 : 0;
-    const listRows = Math.max(0, height - 2 - (3 + queryRows.length) - 1 - headingRows);
+    // Help lines take the rows directly above the entry field, so the block
+    // sits next to what it describes and the list keeps the top of the frame.
+    // Capped so the list can never be squeezed away entirely by a long
+    // reference on a short terminal.
+    // Fixed rows: rule + entry field + rule + hint, plus the heading. The list
+    // and the help block share everything above them.
+    const fixedRows = 3 + queryRows.length + 1 + headingRows;
+    const usable = Math.max(0, height - 2 - fixedRows);
+    // Help is asked for deliberately, so it takes the rows it needs first and
+    // the list is shortened -- reading the reference is why the overlay was
+    // opened. The list keeps a small floor so dismissing help (Esc) does not
+    // land on an empty screen, but when even that will not fit the block takes
+    // everything: a list with no rows is one Esc away from coming back.
+    const helpWanted = p.help ? p.help.length : 0;
+    // One line, plus the rule drawn above the block.
+    const helpFits = helpWanted > 0 && usable >= 2;
+    const minListRows = 2;
+    const helpRoom = helpFits ? Math.max(1, usable - minListRows - 1) : 0;
+    const helpRows = Math.min(helpWanted, helpRoom);
+    this.lastHelpRows = helpRows;
+    // While the help block is open the arrows scroll it rather than the list,
+    // so the standing hint would describe keys that are not doing what it says.
+    // Name the scrolling keys and the way out instead -- and mention Esc only
+    // when the block is really drawn, or the hint would promise a view that is
+    // not on screen.
+    const hint = p.renaming
+      ? "rename · Enter save · Esc cancel · empty resets to auto-title"
+      : helpRows > 0
+        ? "↑/↓ PgUp/PgDn scroll · Esc to close"
+        : "↑/↓ pick · Enter " +
+          (p.query ? "start new session" : "open session") +
+          " · type to start a new session · Ctrl+X delete · Alt+R rename";
+    const listRows = Math.max(0, usable - (helpRows > 0 ? helpRows + 1 : 0));
 
     // The entry field's row is reached by counting the rows pushed above it,
     // and that count holds whether or not the list has rows left -- so on a
@@ -726,6 +779,16 @@ export class Screen {
     // screen rather than jumping up and down with the number of sessions.
     for (let i = drawn; i < listRows; i++) out.push("");
 
+    // Help block: a rule, then the lines, immediately above the entry field.
+    if (helpFits && p.help) {
+      // The block scrolls: `helpTop` is clamped by the caller, so this only has
+      // to clamp again against a block that shrank between frames.
+      const top = Math.max(0, Math.min(p.helpTop, Math.max(0, helpWanted - helpRows)));
+      out.push(rule);
+      for (let i = 0; i < helpRows; i++) {
+        out.push(DIM + p.help[top + i].slice(0, Math.max(1, width - 1)) + RESET);
+      }
+    }
     out.push(rule);
     const queryRowIdx = out.length;
     for (let i = 0; i < queryRows.length; i++) {

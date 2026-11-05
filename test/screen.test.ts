@@ -154,7 +154,7 @@ function chatState(input = "hi", cursor = 2, runningTools = 0, status = "idle", 
 function pickerState(index = 0, query = "abc", cursor = 3) {
   return {
     ...chatState(),
-    picker: { items, index, query, cursor, renaming: false },
+    picker: { items, index, query, cursor, renaming: false, help: null, helpTop: 0 },
   };
 }
 
@@ -526,7 +526,7 @@ await (async () => {
     ];
     const frame = renderAt(size.cols, size.rows, screen, {
       ...chatState(),
-      picker: { items: lockedItems, index: 0, query: "", cursor: 0, renaming: false },
+      picker: { items: lockedItems, index: 0, query: "", cursor: 0, renaming: false, help: null, helpTop: 0 },
     });
     const rows = frame.rows.map(strip);
     const heldRow = rows.find((r) => r.includes("held session"));
@@ -570,5 +570,147 @@ await (async () => {
     assert.ok(line.includes("Enter save"), `rename hint missing from ${JSON.stringify(line)}`);
   }
 })();
+
+// ---- Help shown over the picker -----------------------------------------
+//
+// `/help` typed into the picker shows the reference between the list and the
+// entry field rather than closing the overlay, so the highlighted row stays put
+// while it is read. Help is asked for deliberately, so it takes the rows it
+// needs first and the list is shortened -- the reader is looking at the block,
+// not the list, while it is open.
+const HELP = [
+  "Commands:",
+  "  /help, /?           Show this list",
+  "  /quit, /exit        Exit and save sessions",
+  "",
+  "Keys:",
+  "  Enter               Send the line",
+  "  Ctrl+R              Open the session picker",
+  "  Ctrl+T / Ctrl+X     New session / close current session",
+  "  Alt+R               Rename the current session",
+  "  In the picker:  ↑/↓ move · Enter open · Ctrl+X delete",
+  "  Ctrl+V              Attach a clipboard image",
+  "  Ctrl+C              Exit",
+];
+
+const helpState = (help: string[] | null, helpTop = 0) => ({
+  ...pickerState(0, "", 0),
+  picker: { ...pickerState().picker!, help, helpTop },
+});
+
+for (const size of SIZES) {
+  const screen = screenAt(size.cols, size.rows);
+  const frame = renderAt(size.cols, size.rows, screen, helpState(HELP));
+  checkFrame(frame, size, "picker+help");
+  const text = frame.rows.map(strip).join("\n");
+  // Help is an overlay on the picker, not a replacement: the list must still be
+  // there to go back to when the block is dismissed.
+  assert.ok(/session title/.test(text), `${size.cols}x${size.rows}: help hid the list entirely`);
+  // The block starts at its first line and is never drawn with rows missing in
+  // the middle -- a block that silently skips lines is worse than a short one.
+  assert.ok(text.includes(HELP[0]), `${size.cols}x${size.rows}: help block missing`);
+  // Blank lines are shared with the rest of the frame, so match only content.
+  // Both sides are trimmed: the reference is indented for display, and a row
+  // may also be cut short by a narrow terminal.
+  const wanted = HELP.filter((l) => l.trim()).map((l) => l.trim());
+  const drawn = frame.rows
+    .map(strip)
+    .map((r) => r.trim())
+    .filter((r) => r && wanted.includes(r));
+  const fromStart = wanted.slice(0, drawn.length);
+  assert.deepEqual(
+    drawn,
+    fromStart,
+    `${size.cols}x${size.rows}: help rows are not the first ${drawn.length} lines, in order`
+  );
+}
+
+// On a normal terminal the whole reference fits: no scrolling needed, and no
+// truncated block that reads as the complete list.
+for (const size of [
+  { cols: 80, rows: 24 },
+  { cols: 120, rows: 40 },
+]) {
+  const screen = screenAt(size.cols, size.rows);
+  const frame = renderAt(size.cols, size.rows, screen, helpState(HELP));
+  const text = frame.rows.map(strip).join("\n");
+  const missing = HELP.filter((l) => l && !text.includes(l));
+  assert.equal(
+    missing.length,
+    0,
+    `${size.cols}x${size.rows}: help should fit whole, missing ${JSON.stringify(missing)}`
+  );
+}
+
+// Scrolling: `helpTop` picks the first line drawn, and the block is clamped so
+// scrolling past the end shows the tail rather than a blank screen.
+//
+// A short terminal is used deliberately: at 80x24 the whole reference fits, so
+// there is nothing to scroll and `helpTop` is correctly clamped to 0.
+{
+  const size = { cols: 70, rows: 16 };
+  const screen = screenAt(size.cols, size.rows);
+  const top = renderAt(size.cols, size.rows, screen, helpState(HELP, 0));
+  assert.ok(strip(top.rows.join("\n")).includes(HELP[0]), "top of block should start at line 0");
+
+  const scrolled = renderAt(size.cols, size.rows, screen, helpState(HELP, 3));
+  const text = strip(scrolled.rows.join("\n"));
+  assert.ok(!text.includes(HELP[0]), "scrolling down should drop the first line");
+  assert.ok(text.includes(HELP[3]), "scrolling to 3 should draw line 3 first");
+
+  // Past the end the renderer clamps: the last line stays visible.
+  const past = renderAt(size.cols, size.rows, screen, helpState(HELP, 999));
+  checkFrame(past, size, "picker+help scrolled past end");
+  const pastText = strip(past.rows.join("\n"));
+  assert.ok(
+    pastText.includes(HELP[HELP.length - 1]),
+    "scrolled past the end, the last line must still be drawn"
+  );
+  assert.ok(pastText.includes(HELP[0]) === false, "the first line should be gone after scrolling");
+}
+
+// The hint row names the way out while the block is open. Without it the
+// standing picker hint describes keys that are scrolling help rather than the
+// list, and nothing on screen says how to get back.
+{
+  const size = { cols: 80, rows: 24 };
+  const screen = screenAt(size.cols, size.rows);
+  const statusLine = (f: Frame) => strip(f.rows[f.rows.length - 2]).trim();
+
+  const withHelp = renderAt(size.cols, size.rows, screen, helpState(HELP));
+  assert.ok(
+    statusLine(withHelp).includes("Esc to close"),
+    `hint should say how to close the help block, got ${JSON.stringify(statusLine(withHelp))}`
+  );
+
+  const withoutHelp = renderAt(size.cols, size.rows, screen, helpState(null));
+  assert.ok(
+    !statusLine(withoutHelp).includes("Esc to close"),
+    "the plain picker hint must not mention closing help"
+  );
+  assert.ok(
+    statusLine(withoutHelp).includes("pick"),
+    "the plain picker hint should be back once help is dismissed"
+  );
+}
+
+// Esc dismisses the help and returns to the list, rather than closing the
+// picker -- opening help was a detour from picking a session. What is checked
+// here is the rendering side: clearing `help` gives the list its rows back.
+{
+  const size = { cols: 80, rows: 24 };
+  const screen = screenAt(size.cols, size.rows);
+  const withHelp = renderAt(size.cols, size.rows, screen, helpState(HELP));
+  const withoutHelp = renderAt(size.cols, size.rows, screen, helpState(null));
+  const listRows = (f: Frame) => f.rows.map(strip).filter((r) => /session title/.test(r)).length;
+  assert.ok(
+    listRows(withoutHelp) > listRows(withHelp),
+    "dismissing help should give the list its rows back"
+  );
+  assert.ok(
+    !strip(withoutHelp.rows.join("\n")).includes(HELP[0]),
+    "help must be gone once `help` is null"
+  );
+}
 
 process.stderr.write("screen: all frame invariants hold\n");
