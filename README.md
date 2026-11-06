@@ -341,6 +341,46 @@ Slash commands are typed into the input and sent with Enter.
 | `/paste` | Attach the clipboard image (see [Images](#images)) |
 | `/image <path>` | Attach an image file (see [Images](#images)) |
 | `/rename <title>` | Rename the current session. With no title, opens the interactive title editor (same as `Alt+R`) |
+| `/model` | Choose this session's text and image model (see [Models](#models)) |
+
+### Models
+
+`/model` opens a full-screen list of the models available on the configured
+endpoints. The list is fetched from each endpoint's `/models` (every
+OpenAI-compatible provider answers it) and falls back to the configured models
+when an endpoint cannot be reached, so the picker still works offline.
+
+```
+Models  (↑/↓ text · ←/→ image · Enter select · Esc cancel)
+──────────────────────────────────────────────────────────
+    deepseek-flash                     gemini-2.5-flash
+▸ ✓ deepseek-v4-pro                  ▸ gemini-3.6-flash
+    gemini-2.5-pro                     gemini-2.5-pro
+──────────────────────────────────────────────────────────
+images in history: requests go to gemini-3.6-flash · from model endpoint
+```
+
+- **↑/↓** move between text models, **←/→** choose the image model, **Enter**
+  applies the selection to this session, **Esc** cancels.
+- The ✓ marks the text model the session is using and ▸ marks the row Enter
+  will select. In the right-hand column, `▸` marks the image model ←/→ is on;
+  it scrolls on its own, independently of the text list.
+- The **choice is per session**, like everything else in `coda`: switching the
+  model in one session does not reroute another, possibly mid-turn.
+- Only chat-capable models are listed. Endpoints also serve embeddings, audio,
+  transcription and image-generation models; selecting one would break the
+  session on its next message, so they are filtered out.
+- The image model is a separate setting, not a property of the row: `coda` has
+  one image route, chosen whenever the history contains an image. The bottom
+  line says so — **when an image is in the history the image model answers,
+  whatever text model is ticked**.
+- A model whose name advertises image support appears in the image column, as
+  does any configured `CODA_VISION_MODEL`, which is trusted regardless of its
+  name. When nothing image-capable exists the column is empty and ←/→ do
+  nothing.
+
+The selection is held in memory for the session's lifetime; the configured
+`CODA_MODEL` / `CODA_VISION_MODEL` are what a new session starts from.
 
 A line that begins with `/` but names no known command is **not** sent to the
 model. Instead `coda` reports `unknown command: …` in the transcript and leaves

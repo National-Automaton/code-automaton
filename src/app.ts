@@ -6,6 +6,8 @@ import { Session } from "./session.js";
 import { lockHolder } from "./lock.js";
 import { loadAll } from "./store.js";
 import type { SessionRecord } from "./store.js";
+import { loadCatalog, bareId } from "./models.js";
+import type { ModelCatalog } from "./models.js";
 import {
   attachImage,
   clipboardContents,
@@ -112,6 +114,19 @@ export class App {
    * refresh -- the same points at which the sessions list is re-read.
    */
   private heldByOther = new Map<string, string>();
+  /**
+   * The `/model` overlay, when open.
+   *
+   * `catalog` is the fetched list plus which models accept images; `index` is
+   * the highlighted chat model, and `visionIndex` the image model chosen with
+   * Left/Right. The selection is only committed on Enter, so Esc leaves the
+   * session's routing exactly as it was -- arrows move a draft, not the app.
+   */
+  private modelPicker: {
+    catalog: ModelCatalog;
+    index: number;
+    visionIndex: number;
+  } | null = null;
 
   constructor(private config: Config) {
     // The version shown in the header comes from package.json, so `npm version`
@@ -261,7 +276,36 @@ export class App {
               cursor: this.rename.buffer.cursor,
             }
           : null,
+      modelPicker: this.modelPicker
+        ? this.modelPickerState(this.modelPicker)
+        : null,
     });
+  }
+
+  /** Build the screen's view of the `/model` overlay from the app's state. */
+  private modelPickerState(
+    m: NonNullable<App["modelPicker"]>
+  ): NonNullable<Parameters<Screen["render"]>[0]["modelPicker"]> {
+    const route = this.current().route;
+    // The image column offers models believed to accept images, plus the one
+    // in force even when its name does not advertise it (it is configured, so
+    // it is known to work).
+    const vision = m.catalog.chat.filter((c) => c.vision).map((c) => c.id);
+    const current = route.visionModel ? bareId(route.visionModel) : "";
+    if (current && !vision.includes(current)) vision.push(current);
+    return {
+      models: m.catalog.chat.map((c) => ({ id: c.id, vision: c.vision })),
+      index: m.index,
+      selected: bareId(route.textModel),
+      vision,
+      // `m.visionIndex` is already an index into this list. It is clamped, not
+      // re-resolved through `indexOf`: round-tripping it through the name meant
+      // a move was undone whenever the resolved name did not match, and left
+      // the cursor stuck on the model that was already active.
+      visionIndex: Math.max(0, Math.min(m.visionIndex, vision.length - 1)),
+      usingVision: route.usingVision,
+      notice: m.catalog.fetched ? "from model endpoint" : `config only: ${m.catalog.error ?? "not fetched"}`,
+    };
   }
 
   /**
@@ -312,7 +356,8 @@ export class App {
 
   private onKey(k: Key): void {
     if (this.quitting) return;
-    if (this.rename) this.onRenameKey(k);
+    if (this.modelPicker) this.onModelPickerKey(k);
+    else if (this.rename) this.onRenameKey(k);
     else if (this.picker) this.onPickerKey(k);
     else this.onChatKey(k);
   }
@@ -410,8 +455,107 @@ export class App {
     return Math.max(1, this.screen.helpRows - 1);
   }
 
-  private onPickerKey(k: Key): void {
-    const p = this.picker!;
+  /**
+   * Keys while the `/model` overlay is open.
+   *
+   * Up/Down move the text-model highlight, Left/Right the image model, Enter
+   * commits both to this session and closes, and Esc discards. Every key is
+   * consumed: nothing typed here may reach the chat input behind the overlay.
+   *
+   * The image column is only editable when the highlighted model is also the
+   * one in force, because the image model belongs to the session rather than to
+   * a row -- changing it while highlighting a model you have not selected yet
+   * would be changing a setting for a model that is not in use.
+   */
+  private onModelPickerKey(k: Key): void {
+    const m = this.modelPicker!;
+    const models = m.catalog.chat;
+    const vision = this.modelPickerState(m).vision;
+
+    switch (k.type) {
+      case "up":
+        if (models.length) m.index = Math.max(0, m.index - 1);
+        break;
+      case "down":
+        if (models.length) m.index = Math.min(models.length - 1, m.index + 1);
+        break;
+      case "left":
+        if (vision.length) m.visionIndex = Math.max(0, m.visionIndex - 1);
+        break;
+      case "right":
+        if (vision.length) m.visionIndex = Math.min(vision.length - 1, m.visionIndex + 1);
+        break;
+      case "escape":
+        // Discard: the arrows only moved a draft, so the session's routing is
+        // untouched and closing is all that is left to do.
+        this.modelPicker = null;
+        this.requestRender();
+        return;
+      case "enter": {
+        const chosen = models[m.index]?.id;
+        if (chosen) {
+          const visionChoice = vision[m.visionIndex] ?? this.current().route.visionModel;
+          // Store null when the choice matches config, so a later config change
+          // is picked up rather than shadowed by a stale explicit selection.
+          const text = bareId(chosen) === bareId(this.config.model) ? null : chosen;
+          const img =
+            !visionChoice || bareId(visionChoice) === bareId(this.config.visionModel)
+              ? null
+              : visionChoice;
+          this.current().setModels(text, img);
+          this.systemNote(
+            `model: ${bareId(chosen)}` +
+              (visionChoice ? ` · images: ${bareId(visionChoice)}` : " · images: none") +
+              (this.current().route.usingVision
+                ? "  (history has an image, so the image model answers)"
+                : "")
+          );
+        }
+        this.modelPicker = null;
+        this.requestRender();
+        return;
+      }
+      case "ctrl":
+        if (k.ch === "c") {
+          this.quit();
+          return;
+        }
+        break;
+      default:
+        // Any other key is swallowed rather than typed: the overlay owns the
+        // keyboard while it is up.
+        break;
+    }
+    this.requestRender();
+  }
+
+  /**
+   * Open the `/model` overlay.
+   *
+   * The list is fetched, but never awaited to the point of blocking the UI: it
+   * degrades to the configured models when the endpoint cannot be reached, so
+   * an offline machine can still see and reselect what it is running.
+   */
+  private async openModelPicker(): Promise<void> {
+    const catalog = await loadCatalog(this.config);
+    const route = this.current().route;
+    const current = bareId(route.textModel);
+    const idx = Math.max(0, catalog.chat.findIndex((c) => c.id === current));
+
+    // Start the image cursor on the model actually in force, resolved against
+    // the same list the overlay will draw (which may append the configured
+    // model when its name does not advertise image support).
+    const vision = catalog.chat.filter((c) => c.vision).map((c) => c.id);
+    const activeVision = route.visionModel ? bareId(route.visionModel) : "";
+    if (activeVision && !vision.includes(activeVision)) vision.push(activeVision);
+    const visionIndex = Math.max(0, vision.indexOf(activeVision));
+
+    this.modelPicker = { catalog, index: idx, visionIndex };
+    this.screen.resetModelWindow();
+    this.requestRender();
+  }
+
+  private onPickerKey(k: Key): void {    const p = this.picker!;
     const items = this.pickerSessions();
     const n = items.length;
     const q = p.query;
@@ -921,6 +1065,7 @@ export class App {
         "  /paste              Attach the image on the Windows clipboard (WSL)",
         "  /image <path>       Attach an image file to your next message",
         "  /rename <title>     Rename the current session (no title: edit it interactively)",
+        "  /model              Choose this session's text and image model",
         "  /prune-images       Delete cached screenshots no session refers to",
         "",
         "Keys:",
@@ -1285,6 +1430,11 @@ export class App {
     if (text === "/prune-images") {
       clrInput();
       void this.pruneImages();
+      return true;
+    }
+    if (text === "/model") {
+      clrInput();
+      void this.openModelPicker();
       return true;
     }
     if (text === "/quit" || text === "/exit") {
