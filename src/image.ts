@@ -90,6 +90,85 @@ export async function cacheImage(absPath: string): Promise<string> {
   }
 }
 
+/**
+ * Cached images younger than this are never pruned.
+ *
+ * A screenshot is written to the cache when it is attached, but the session
+ * that references it is not saved until the turn ends -- and if coda is killed
+ * in between, the file is on disk with no session mentioning it yet. The guard
+ * keeps a prune that runs in those seconds from deleting an image that is about
+ * to be referenced.
+ */
+const PRUNE_MIN_AGE_MS = 60 * 60 * 1000;
+
+/** Both marker spellings that name an image: stored and detached. */
+const IMAGE_MARKER = /^\[image(?: sent)?: (.+)\]$/;
+
+/**
+ * Every image path mentioned anywhere in a session's messages.
+ *
+ * Cheap by construction: it walks content arrays looking at text parts, without
+ * re-reading or re-parsing any session file. Callers pass records they already
+ * have -- `App.start()` gets them from `loadAll()` -- so the scan costs a couple
+ * of milliseconds across the whole corpus rather than a second pass over it.
+ */
+export function imagePathsIn(
+  messages: Array<{ content?: unknown }>
+): string[] {
+  const found: string[] = [];
+  for (const message of messages) {
+    const content = (message as any)?.content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      const text = typeof (part as any)?.text === "string" ? (part as any).text : null;
+      if (!text) continue;
+      const m = IMAGE_MARKER.exec(text.trim());
+      if (m) found.push(m[1]);
+    }
+  }
+  return found;
+}
+
+/**
+ * Delete cached images no session refers to any more.
+ *
+ * The cache is content-addressed, so one file can be referenced by several
+ * sessions: deleting the file when a session is deleted would pull the image
+ * out from under every other session that attached the same screenshot. That is
+ * why this works from references rather than from deletions, and why it is a
+ * sweep rather than a hook on the delete button.
+ *
+ * `referenced` should be every path mentioned by every session on disk. Files
+ * not in that set and older than `PRUNE_MIN_AGE_MS` are removed. Returns the
+ * paths that were deleted, for logging and for tests.
+ */
+export async function pruneImageCache(referenced: Set<string>): Promise<string[]> {
+  let names: string[];
+  try {
+    // Skip the whole thing when nothing has been cached -- the common case.
+    names = await fs.readdir(IMAGES_DIR);
+  } catch {
+    return []; // no cache directory yet
+  }
+
+  const now = Date.now();
+  const removed: string[] = [];
+  for (const name of names) {
+    const full = path.join(IMAGES_DIR, name);
+    if (referenced.has(full)) continue;
+    try {
+      const stat = await fs.stat(full);
+      if (!stat.isFile()) continue;
+      if (now - stat.mtimeMs < PRUNE_MIN_AGE_MS) continue;
+      await fs.unlink(full);
+      removed.push(full);
+    } catch {
+      // Vanished between readdir and stat, or unreadable: leave it.
+    }
+  }
+  return removed;
+}
+
 /** Check a path can be attached, without reading the whole file. */
 export async function attachImage(p: string): Promise<AttachedImage> {
   const absPath = path.resolve(p);

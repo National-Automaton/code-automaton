@@ -61,6 +61,8 @@ Commands (typed into the input, sent with Enter):
   /image <path>       Attach an image file to your next message
   /rename <title>     Rename the current session. Without a title, opens the
                       interactive title editor (same as Alt+R).
+  /prune-images       Delete cached screenshots no session refers to. The same
+                      sweep runs at startup.
 
   A line starting with "/" that is not one of these is reported as an
   unknown command instead of being sent to the model.
@@ -72,6 +74,7 @@ Environment (any OpenAI-compatible endpoint works):
                       Also reads DEEPSEEK_BASE_URL / OPENAI_BASE_URL.
   CODA_MODEL          Model name (default: deepseek-chat)
   CODA_SESSIONS_DIR   Session storage (default: ~/.coda/sessions)
+  CODA_IMAGES_DIR     Cached screenshots (default: ~/.coda/images)
   CODA_MOUSE          Mouse reporting (default: on). Set to "off" to leave the
                       mouse to the terminal, so drag-to-select works without
                       Shift; the wheel then scrolls the terminal, not coda.
