@@ -356,6 +356,7 @@ own is exempt and is sent as ordinary text (e.g. a pasted absolute path).
 | `CODA_BASE_URL` | `https://api.deepseek.com` (also reads `DEEPSEEK_BASE_URL` / `OPENAI_BASE_URL`) |
 | `CODA_MODEL` | `deepseek-chat` (also reads `DEEPSEEK_MODEL` / `OPENAI_MODEL`) |
 | `CODA_SESSIONS_DIR` | `~/.coda/sessions` (also reads the older `DSC_SESSIONS_DIR`) |
+| `CODA_IMAGES_DIR` | `~/.coda/images` — cached copies of attached screenshots |
 | `CODA_MOUSE` | `on` — set to `off` to leave mouse selection to the terminal (see [Scrolling back](#scrolling-back)) |
 | `CODA_PARALLEL_TOOLS` | `on` — set to `off` to run tool calls strictly in the order the model requested them (see [Parallel tool calls](#parallel-tool-calls)) |
 | `CODA_MAX_CONTEXT_CHARS` | `3200000` — the history budget for one request (~800k tokens). Lower it for a model with a smaller context window |

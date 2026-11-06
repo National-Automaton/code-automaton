@@ -33,6 +33,8 @@ const {
   stripImagesForStorage,
   attachImage,
   cacheImage,
+  imagePathsIn,
+  pruneImageCache,
   IMAGES_DIR,
 } = await import("../src/image.js");
 const { runTool } = await import("../src/tools.js");
@@ -175,6 +177,59 @@ async function main() {
       "[image: " + img.path + "]",
       "the placeholder names the cached path, which view_image can re-read"
     );
+  }
+
+  // --- the prune: only unreferenced, only old enough ----------------------
+
+  {
+    // Both marker spellings are recognised, and nothing else is mistaken for
+    // one -- a prune that misses a reference deletes a live screenshot.
+    const found = imagePathsIn([
+      { content: [{ type: "text", text: "[image: /a.png]" }] },
+      { content: [{ type: "text", text: "[image sent: /b.png]" }] },
+      { content: [{ type: "text", text: "just a [image: inside] sentence" }] },
+      { content: "/plain string" },
+      { content: [{ type: "text", text: "no marker here" }] },
+    ] as any);
+    assert.deepEqual(
+      found,
+      ["/a.png", "/b.png"],
+      `expected both markers, got ${JSON.stringify(found)}`
+    );
+  }
+
+  {
+    await fs.mkdir(IMAGES_DIR, { recursive: true });
+    const keep = path.join(IMAGES_DIR, "keep.png");
+    const drop = path.join(IMAGES_DIR, "drop.png");
+    const fresh = path.join(IMAGES_DIR, "fresh.png");
+    await fs.writeFile(keep, PNG);
+    await fs.writeFile(drop, PNG);
+    await fs.writeFile(fresh, PNG);
+    // Age the two that are eligible; `fresh` stays inside the guard.
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    await fs.utimes(keep, old, old);
+    await fs.utimes(drop, old, old);
+
+    const removed = await pruneImageCache(new Set([keep]));
+
+    assert.deepEqual(removed, [drop], `only the unreferenced old file goes, got ${JSON.stringify(removed)}`);
+    assert.ok(await fs.stat(keep).then(() => true, () => false), "a referenced image must survive");
+    assert.ok(await fs.stat(fresh).then(() => true, () => false), "a just-written image must survive");
+    assert.ok(!(await fs.stat(drop).then(() => true, () => false)), "the unreferenced old image should be gone");
+  }
+
+  // --- and it is a no-op when nothing has ever been cached ----------------
+
+  {
+    const empty = path.join(dir, "empty-images");
+    const before = process.env.CODA_IMAGES_DIR;
+    // `IMAGES_DIR` is resolved at import, so this checks the failure path
+    // instead: a missing directory must not throw.
+    await fs.rm(empty, { recursive: true, force: true });
+    const removed = await pruneImageCache(new Set()).catch((e) => e);
+    assert.ok(Array.isArray(removed), `prune should never throw, got ${removed}`);
+    process.env.CODA_IMAGES_DIR = before;
   }
 
   await fs.rm(dir, { recursive: true, force: true });

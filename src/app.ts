@@ -6,7 +6,14 @@ import { Session } from "./session.js";
 import { lockHolder } from "./lock.js";
 import { loadAll } from "./store.js";
 import type { SessionRecord } from "./store.js";
-import { attachImage, clipboardContents, clipboardImagePath, ImageError } from "./image.js";
+import {
+  attachImage,
+  clipboardContents,
+  clipboardImagePath,
+  imagePathsIn,
+  pruneImageCache,
+  ImageError,
+} from "./image.js";
 import type { AttachedImage } from "./image.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -119,6 +126,16 @@ export class App {
     // then typing into) was the wrong default. Past sessions stay one keypress
     // away via the picker, which Esc returns from to this new session.
     const records = await loadAll();
+
+    // Collect the images those records still refer to and drop any cache file
+    // nothing mentions. Done here because the records are already parsed --
+    // reading the corpus a second time on startup just to find a handful of
+    // paths would be wasted work. Fire-and-forget: nothing waits on it, and a
+    // failure only leaves files for the next run.
+    void pruneImageCache(
+      new Set(records.flatMap((rec) => imagePathsIn(rec.messages as any)))
+    ).catch(() => {});
+
     for (const rec of records) this.sessions.push(new Session(this.config, rec));
     const fresh = new Session(this.config);
     this.sessions.push(fresh);
@@ -904,6 +921,7 @@ export class App {
         "  /paste              Attach the image on the Windows clipboard (WSL)",
         "  /image <path>       Attach an image file to your next message",
         "  /rename <title>     Rename the current session (no title: edit it interactively)",
+        "  /prune-images       Delete cached screenshots no session refers to",
         "",
         "Keys:",
         "  Enter               Send the line (mid-turn, fold it into the running turn)",
@@ -1261,6 +1279,14 @@ export class App {
       this.requestRender();
       return true;
     }
+    // `/prune-images` sweeps the image cache by hand. The same sweep runs at
+    // startup, so this is for when the user wants to reclaim space without
+    // restarting, or to see what it did.
+    if (text === "/prune-images") {
+      clrInput();
+      void this.pruneImages();
+      return true;
+    }
     if (text === "/quit" || text === "/exit") {
       this.quit();
       return true;
@@ -1270,6 +1296,35 @@ export class App {
     // say so rather than guessing at the intent.
     this.unknownCommand(text);
     return false;
+  }
+
+  /**
+   * Sweep the image cache from the command line.
+   *
+   * References come from the sessions this terminal knows about, which is the
+   * same set the startup sweep uses. A session open in another terminal that
+   * has an unsaved attachment would not be counted -- but such an image is
+   * still inside the prune's age guard, so it is not at risk.
+   */
+  private async pruneImages(): Promise<void> {
+    // References come from the chat histories, not the transcript `entries`:
+    // the `[image: ...]` markers live in message content, and a session open in
+    // this terminal has not been persisted yet, so the file on disk may be
+    // stale. In-memory sessions first, then whatever else is on disk.
+    const referenced = new Set<string>();
+    for (const s of this.sessions) {
+      for (const p of imagePathsIn(s.toRecord().messages as any)) referenced.add(p);
+    }
+    for (const rec of await loadAll().catch(() => [])) {
+      for (const p of imagePathsIn(rec.messages as any)) referenced.add(p);
+    }
+    this.systemNote("sweeping the image cache…");
+    const removed = await pruneImageCache(referenced).catch(() => []);
+    this.systemNote(
+      removed.length === 0
+        ? "image cache: nothing to remove"
+        : `image cache: removed ${removed.length} unused image${removed.length === 1 ? "" : "s"}`
+    );
   }
 
   private quit(): void {
