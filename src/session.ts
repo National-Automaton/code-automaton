@@ -100,6 +100,21 @@ export class Session {
   }
 
   /**
+   * The model routing for this session, for the `/model` overlay.
+   *
+   * Delegated to the agent because only it knows whether the history holds an
+   * image, and therefore which model the next request will actually reach.
+   */
+  get route(): ReturnType<Agent["currentRoute"]> {
+    return this.agent.currentRoute();
+  }
+
+  /** Choose this session's text and image models. Null restores config. */
+  setModels(text: string | null, vision: string | null): void {
+    this.agent.setModels(text, vision);
+  }
+
+  /**
    * Take the session's lock so a second coda cannot open it at the same time.
    * Idempotent: already holding it is success.
    *

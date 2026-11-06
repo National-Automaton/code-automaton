@@ -423,11 +423,72 @@ export class Agent {
     return this.messages.some((m) => hasImagePart((m as any).content));
   }
 
+  /**
+   * Models chosen for this session from the `/model` picker, overriding config.
+   *
+   * Held per `Agent` -- that is, per `Session` -- because `coda` runs many
+   * sessions at once. A global switch would silently reroute a session the user
+   * is not looking at, possibly mid-turn. Null means "use the config value",
+   * which is also what `/model`'s "reset to config" leaves behind.
+   *
+   * The text and image choices are independent. They are not paired: the image
+   * route is chosen by `needsVision()`, not by which text model is selected, so
+   * tying one to the other would claim a relationship the routing does not have.
+   */
+  private modelOverride: string | null = null;
+  private visionOverride: string | null = null;
+
+  /** True if any message in the history carries an image. */
+  hasImages(): boolean {
+    return this.needsVision();
+  }
+
+  /**
+   * The model and endpoint the next request will use, and why.
+   *
+   * Exposed so `/model` can state the routing decision rather than repeat the
+   * configured names: when the history holds an image the vision model is used
+   * whatever the text selection says, and a display that hid that would be
+   * lying about which model answers.
+   */
+  currentRoute(): {
+    model: string;
+    visionModel: string;
+    usingVision: boolean;
+    textModel: string;
+    textOverride: string | null;
+    visionOverride: string | null;
+  } {
+    const usingVision = this.needsVision();
+    return {
+      model: usingVision ? this.visionModelName() : this.textModelName(),
+      visionModel: this.visionModelName(),
+      usingVision,
+      textModel: this.textModelName(),
+      textOverride: this.modelOverride,
+      visionOverride: this.visionOverride,
+    };
+  }
+
+  private textModelName(): string {
+    return this.modelOverride ?? this.config.model;
+  }
+
+  private visionModelName(): string {
+    return this.visionOverride ?? this.config.visionModel;
+  }
+
+  /** Choose this session's models. Null restores the configured value. */
+  setModels(text: string | null, vision: string | null): void {
+    this.modelOverride = text;
+    this.visionOverride = vision;
+  }
+
   /** The client and model to use for the next request. */
   private route(): { client: OpenAI; model: string } {
     return this.needsVision()
-      ? { client: this.visionClient, model: this.config.visionModel }
-      : { client: this.client, model: this.config.model };
+      ? { client: this.visionClient, model: this.visionModelName() }
+      : { client: this.client, model: this.textModelName() };
   }
 
   /**
@@ -457,7 +518,7 @@ export class Agent {
       .join("\n\n");
 
     const res = await this.client.chat.completions.create({
-      model: this.config.model,
+      model: this.textModelName(),
       messages: [
         {
           role: "system",

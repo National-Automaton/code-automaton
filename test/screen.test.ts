@@ -33,6 +33,8 @@ const ESC = "\u001b[";
 const ANSI = /\x1b\[[0-9;?]*[a-zA-Z]/g;
 /** The caret placement: ESC[<row>;<col>H then show-cursor. */
 const CARET = new RegExp(`^\\u001b\\[(\\d+);(\\d+)H\\u001b\\[\\?25h$`);
+/** A frame that parks the caret and hides it: ESC[<row>;<col>H then hide-cursor. */
+const CARET_HIDDEN = new RegExp(`^\\u001b\\[(\\d+);(\\d+)H\\u001b\\[\\?25l$`);
 const strip = (s: string) => s.replace(ANSI, "");
 
 /** A frame as the terminal would apply it. */
@@ -41,6 +43,8 @@ interface Frame {
   rows: string[];
   /** Caret position from the last cursor placement, 1-based, or null. */
   caret: { row: number; col: number } | null;
+  /** True when the frame parked the caret and explicitly hid it. */
+  caretHidden: boolean;
   /** How many full-frame paints the render emitted. Cells: one paint per frame. */
   paints: number;
 }
@@ -79,16 +83,19 @@ function renderAt(cols: number, rows: number, screen: Screen, state: Parameters<
   // A paint is the write that homes the cursor and repaints the frame; the
   // small writes around it are the cursor park and the caret placement.
   const paintWrites = writes.filter((w) => w.startsWith(ESC + "H"));
-  const caretWrites = writes.filter((w) => CARET.test(w));
+  const caretWrites = writes.filter((w) => CARET.test(w) || CARET_HIDDEN.test(w));
   assert.ok(
     caretWrites.length <= 1,
     `a frame should place the caret at most once, got ${caretWrites.length}`
   );
-  const match = caretWrites[0] ? CARET.exec(caretWrites[0]) : null;
+  const shown = caretWrites[0] ? CARET.exec(caretWrites[0]) : null;
+  const hidden = caretWrites[0] ? CARET_HIDDEN.exec(caretWrites[0]) : null;
+  const match = shown ?? hidden;
 
   return {
     rows: paintWrites.join("").split("\r\n"),
-    caret: match ? { row: Number(match[1]), col: Number(match[2]) } : null,
+    caret: shown ? { row: Number(shown[1]), col: Number(shown[2]) } : null,
+    caretHidden: !!hidden,
     paints: paintWrites.length,
   };
 }
@@ -158,6 +165,33 @@ function pickerState(index = 0, query = "abc", cursor = 3) {
   };
 }
 
+/**
+ * The `/model` overlay.
+ *
+ * Ids are deliberately long (Gemini reports `models/gemini-2.5-flash-native-…`
+ * style names) because the two-column split is width-sensitive: the failure
+ * this guards against is a row that overflows the terminal and soft-wraps,
+ * which shifts the whole frame down and pushes the header into scrollback.
+ */
+function modelState(index = 1, visionIndex = 1, usingVision = true) {
+  return {
+    ...chatState(),
+    modelPicker: {
+      models: [
+        { id: "deepseek-flash", vision: false },
+        { id: "deepseek-v4-pro", vision: false },
+        { id: "gemini-2.5-flash-native-audio", vision: true },
+      ],
+      index,
+      selected: "deepseek-v4-pro",
+      vision: ["gemini-2.5-flash", "gemini-3.6-flash"],
+      visionIndex,
+      usingVision,
+      notice: "from model endpoint",
+    },
+  };
+}
+
 /** Rows the input line occupies for `input`, mirroring `Screen.inputRows`. */
 function inputRowsFor(input: string, cols: number): number {
   if (input.length === 0) return 1;
@@ -195,8 +229,9 @@ function checkFrame(frame: Frame, { cols, rows }: Case, label: string): void {
   });
   // Every frame must place the caret itself; a frame that leaves it where
   // `draw()` parked it (1;1) is the bug that made the cursor flash in the
-  // top-left corner.
-  assert.ok(frame.caret, `${label}: no caret was placed`);
+  // top-left corner. A frame with no text field (the `/model` overlay) hides it
+  // instead, which is a placement in the same sense and is accepted.
+  assert.ok(frame.caret || frame.caretHidden, `${label}: no caret was placed`);
 }
 
 /** Every row that begins with the prompt gutter. */
@@ -601,8 +636,7 @@ const helpState = (help: string[] | null, helpTop = 0) => ({
 for (const size of SIZES) {
   const screen = screenAt(size.cols, size.rows);
   const frame = renderAt(size.cols, size.rows, screen, helpState(HELP));
-  checkFrame(frame, size, "picker+help");
-  const text = frame.rows.map(strip).join("\n");
+  checkFrame(frame, size, "picker+help");  const text = frame.rows.map(strip).join("\n");
   // Help is an overlay on the picker, not a replacement: the list must still be
   // there to go back to when the block is dismissed.
   assert.ok(/session title/.test(text), `${size.cols}x${size.rows}: help hid the list entirely`);
@@ -779,6 +813,72 @@ for (const size of [
     before,
     "moving the anchor should move the view"
   );
+}
+
+// The `/model` overlay: a second full-screen frame. It shares the picker's
+// layout code but not its widths, so it gets the same size sweep.
+for (const size of SIZES) {
+  const screen = screenAt(size.cols, size.rows);
+  const frame = renderAt(size.cols, size.rows, screen, modelState());
+  checkFrame(frame, size, `model ${size.cols}x${size.rows}`);
+  const text = frame.rows.map(strip).join("\n");
+  // The ticked model is the one in force, and it is not the highlighted row's
+  // model -- the ✓ and the ▸ mean different things and must not be conflated.
+  assert.ok(/✓ deepseek-v4-pro/.test(text), `${size.cols}x${size.rows}: the selected model is not ticked`);
+  assert.ok(/▸/.test(text), `${size.cols}x${size.rows}: no highlight`);
+  // The image list lives in the right-hand column, with its own cursor. Narrow
+  // terminals truncate ids, so only the column's presence is required here.
+  assert.ok(
+    /gemini-2\.5-flash/.test(text),
+    `${size.cols}x${size.rows}: the image column is not drawn`
+  );
+  // Routing is stated: with an image in history the text choice is not what
+  // answers, and the overlay must say so instead of letting the ✓ imply it.
+  assert.ok(
+    /images in history/.test(text),
+    `${size.cols}x${size.rows}: vision routing is not reported`
+  );
+}
+
+// The image list is a column with its own cursor: moving it must be visible
+// under that cursor, not silently rewrite a label on some other row. This is
+// the regression that made it look like only the active model was selectable.
+// The cursor is the `▸` alone -- the name is not bracketed, since a mark in the
+// column already says which row is current.
+for (const [visionIndex, expected] of [
+  [0, "gemini-2.5-flash"],
+  [1, "gemini-3.6-flash"],
+] as const) {
+  const screen = screenAt(88, 24);
+  const frame = renderAt(88, 24, screen, modelState(1, visionIndex));
+  const text = frame.rows.map(strip).join("\n");
+  assert.ok(
+    text.includes(`▸ ${expected}`),
+    `image cursor at ${visionIndex} should mark ${expected}, got:\n${text}`
+  );
+  // Only one row per column carries the cursor: a second `▸` would mean the
+  // mark is ambiguous. (The text column's own `▸` is the other one.)
+  assert.equal(
+    (text.match(/▸/g) ?? []).length,
+    2,
+    `expected one text cursor and one image cursor, got:\n${text}`
+  );
+  // The routing line names the model under the cursor, so the choice and its
+  // consequence are never separated.
+  assert.ok(
+    new RegExp(`requests go to ${expected.replace(/\./g, "\\.")}`).test(text),
+    `routing should name ${expected} when it is selected`
+  );
+}
+
+// Esc cancels, so the arrows only move a draft: a highlighted row that is not
+// ticked must not be presented as in force.
+{
+  const screen = screenAt(80, 24);
+  const frame = renderAt(80, 24, screen, modelState(2, 0, false));
+  const text = frame.rows.map(strip).join("\n");
+  assert.ok(/text only/.test(text), "with no image in history the routing line says text-only");
+  assert.ok(!/✓ deepseek-flash/.test(text), "an unselected row is never ticked");
 }
 
 process.stderr.write("screen: all frame invariants hold\n");

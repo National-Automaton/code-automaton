@@ -174,6 +174,39 @@ export interface RenderState {
    * The input line is replaced by the title editor.
    */
   rename: { title: string; value: string; cursor: number } | null;
+  /**
+   * When set, the `/model` overlay is shown full-screen -- the same frame the
+   * session picker takes over.
+   *
+   * Two columns: the chat models on the left with the selected one ticked, and
+   * the image model that goes with each on the right. The image column is a
+   * per-session setting rather than a property of the row (coda has one vision
+   * slot, not one per text model), so it is drawn once, beside the ticked row,
+   * and `visionIndex` names the model chosen for it.
+   *
+   * Optional so every caller that never opens this overlay is unaffected;
+   * absent means "not open".
+   */
+  modelPicker?: {
+    models: { id: string; vision: boolean }[];
+    /** Highlighted chat model. */
+    index: number;
+    /** Model this session currently uses, to place the ✓. */
+    selected: string;
+    /**
+     * Image models to choose between and the one in force. Empty when nothing
+     * image-capable is available, in which case the right-hand column is blank
+     * and Left/Right do nothing.
+     */
+    vision: string[];
+    visionIndex: number;
+    /** First image-model row drawn in the right column; it scrolls on its own. */
+    visionTop?: number;
+    /** True when history holds an image, so vision routing is actually in use. */
+    usingVision: boolean;
+    /** Note about where the list came from, or why it is only config. */
+    notice: string;
+  } | null;
 }
 
 /**
@@ -257,6 +290,10 @@ export class Screen {
    * until you actually reach the edge.
    */
   private pickerTop = 0;
+  /** First `/model` row drawn; that list scrolls the same way. */
+  private modelTop = 0;
+  /** First image-model row drawn in the `/model` right column. */
+  private visionTop = 0;
   /**
    * The last non-zero tool count, and when it stopped being current.
    *
@@ -368,6 +405,12 @@ export class Screen {
    */
   resetPickerWindow(): void {
     this.pickerTop = 0;
+  }
+
+  /** Start the `/model` overlay with both columns scrolled to the top. */
+  resetModelWindow(): void {
+    this.modelTop = 0;
+    this.visionTop = 0;
   }
 
   /**
@@ -619,6 +662,10 @@ export class Screen {
     // a column from where the previous row ended.
     out.push(header);
     out.push("");
+    if (s.modelPicker) {
+      this.renderModelPicker(s.modelPicker, out, width, height);
+      return;
+    }
     if (s.picker) {
       this.renderPicker(s.picker, out, width, height);
       return;
@@ -714,6 +761,135 @@ export class Screen {
    * state, so the following newline moves down *two* rows and every row after
    * it is drawn shifted. Every row here therefore stays within `width - 1`.
    */
+  /**
+   * The `/model` overlay: chat models on the left, image model on the right.
+   *
+   * Shares the picker's frame -- full screen, header, rules -- because both are
+   * modal overlays and a second visual language would be noise. The layout is
+   * two columns rather than one row per model: the image model is a session
+   * setting, not a property of the highlighted text model, so drawing it on
+   * every row would imply a pairing the routing does not have. It is shown once,
+   * aligned to the ticked row.
+   */
+  private renderModelPicker(
+    p: NonNullable<RenderState["modelPicker"]>,
+    out: string[],
+    width: number,
+    height: number
+  ): void {
+    const rule = DIM + "─".repeat(Math.max(1, width - 1)) + RESET;
+    const rows = p.models.length;
+    // Header row + rule + hint + rule, plus the heading line.
+    const fixed = 4;
+    const listRows = Math.max(0, height - 2 - fixed);
+    this.lastHelpRows = 0;
+
+    // Clamped like every other row: an over-long hint soft-wraps, which shifts
+    // the whole frame down one row and pushes row 0 into scrollback. Built as
+    // plain text and sliced before styling, the way the picker rows are.
+    const hint = "Models  (↑/↓ text · ←/→ image · Enter select · Esc cancel)";
+    out.push(BOLD + hint.slice(0, Math.max(1, width - 1)) + RESET);
+    out.push(rule);
+
+    // Column split: the text column gets everything the image column does not
+    // need, so a long Gemini id cannot squeeze the left list to nothing.
+    const leftWidth = Math.max(12, Math.min(width - 4, Math.floor((width - 1) * 0.55)));
+    const rightWidth = Math.max(0, width - 2 - leftWidth - 1);
+
+    // The window follows the highlight without sliding every press.
+    const maxTop = Math.max(0, rows - listRows);
+    if (p.index < this.modelTop) this.modelTop = p.index;
+    else if (p.index >= this.modelTop + listRows) this.modelTop = p.index - listRows + 1;
+    this.modelTop = Math.max(0, Math.min(this.modelTop, maxTop));
+
+    const start = rows === 0 ? 0 : this.modelTop;
+    const end = Math.min(start + listRows, rows);
+
+    // The image models are a second, vertical list in the right-hand column.
+    // It has its own cursor (a `▸`, and `[ ]` around the name) because a
+    // control that only rewrites a label somewhere else looks like a dead key --
+    // that was the "only the active model is selectable" report.
+    const visionIndex = Math.max(0, Math.min(p.visionIndex, Math.max(0, p.vision.length - 1)));
+    const visionLabel = p.vision.length ? p.vision[visionIndex] : "";
+
+    // The image list is drawn from its own top, independent of the text list's
+    // scroll: the two columns move under different keys, so scrolling one must
+    // not drag the other. The window follows its cursor, kept as state so rows
+    // stay put under the cursor instead of the whole column sliding.
+    const maxVisionTop = Math.max(0, p.vision.length - listRows);
+    if (p.vision.length && listRows > 0) {
+      if (visionIndex < this.visionTop) this.visionTop = visionIndex;
+      else if (visionIndex >= this.visionTop + listRows)
+        this.visionTop = visionIndex - listRows + 1;
+    }
+    this.visionTop = Math.max(0, Math.min(this.visionTop, maxVisionTop));
+    const visionTop = this.visionTop;
+
+    let drawn = 0;
+    for (let i = start; i < end; i++) {
+      const m = p.models[i];
+      const active = i === p.index;
+      const isCurrent = m.id === p.selected;
+      const mark = isCurrent ? "✓ " : "  ";
+      const prefix = active ? "▸ " : "  ";
+      const label = (prefix + mark + m.id).slice(0, leftWidth).padEnd(leftWidth);
+
+      // Right column: the image-model list. It is the same list on every row
+      // (there is one image setting, not one per text model), drawn in place so
+      // ←/→ acts on what is visibly under the cursor.
+      let right = "";
+      if (rightWidth > 4) {
+        const vRow = visionTop + (i - start);
+        const name = p.vision[vRow];
+        if (name) {
+          const isCursor = vRow === visionIndex;
+          // Clamped to the column: a row that runs past the terminal width
+          // soft-wraps and pushes the whole frame down a line. The cursor is
+          // the `▸` alone -- it marks the row in place, so bracketing the name
+          // as well would only repeat what the arrow already says.
+          right = ((isCursor ? "▸ " : "  ") + name).slice(
+            0,
+            Math.max(1, rightWidth - 1)
+          );
+        }
+      }
+      const rightText = right ? " " + right : "";
+      const styled =
+        right.startsWith("▸ ") ? label + BOLD + rightText + RESET : label + DIM + rightText + RESET;
+
+      if (active) {
+        const plain = (label + rightText).slice(0, width - 1).padEnd(Math.max(1, width - 1));
+        out.push(REVERSE + plain + RESET);
+      } else {
+        out.push(right ? styled : label);
+      }
+      drawn++;
+    }
+    if (rows === 0 && listRows > 0) {
+      out.push(DIM + "  (no models)" + RESET);
+      drawn++;
+    }
+    for (let i = drawn; i < listRows; i++) out.push("");
+
+    out.push(rule);
+
+    // Routing, stated plainly: with an image in the history the vision model
+    // answers whatever the text selection says, so say so rather than let the ✓
+    // imply otherwise.
+    const routing = p.usingVision
+      ? `images in history: requests go to ${visionLabel || "(no image model)"}`
+      : "text only: no images in history";
+    const note = p.notice ? `${routing} · ${p.notice}` : routing;
+    out.push(DIM + note.slice(0, Math.max(1, width - 1)) + RESET);
+    this.draw(out);
+
+    // There is no text field here, so the caret is parked on the top row and
+    // hidden rather than left where `draw()` put it. A visible caret blinking
+    // in the header would read as an editable line that does not exist -- the
+    // same complaint the picker's top-left caret caused.
+    stdout.write(ESC + "1;1H" + HIDE_CURSOR);
+  }
+
   private renderPicker(
     p: NonNullable<RenderState["picker"]>,
     out: string[],
