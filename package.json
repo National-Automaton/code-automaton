@@ -40,7 +40,7 @@
     "start": "node dist/index.js",
     "setup-hooks": "git config core.hooksPath .githooks || true",
     "prepare": "npm run build && npm run setup-hooks",
-    "test": "tsx test/screen.test.ts && tsx test/tools.test.ts && tsx test/lock.test.ts && tsx test/compact.test.ts && tsx test/repair.test.ts && tsx test/note.test.ts && tsx test/paste.test.ts",
+    "test": "tsx test/screen.test.ts && tsx test/tools.test.ts && tsx test/lock.test.ts && tsx test/compact.test.ts && tsx test/repair.test.ts && tsx test/note.test.ts && tsx test/paste.test.ts && tsx test/stream-interrupt.test.ts",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json --noEmit"
   },
   "dependencies": {

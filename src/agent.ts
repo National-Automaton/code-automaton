@@ -12,6 +12,15 @@ import {
   imageParts,
 } from "./image.js";
 
+/**
+ * How many times one turn may be resumed after the connection drops mid-reply.
+ *
+ * Each resume keeps the text already received and asks the model to continue,
+ * so a single drop costs nothing visible. A connection that dies every time
+ * would otherwise spin forever, so the turn fails explicitly instead.
+ */
+const MAX_INTERRUPTIONS = 3;
+
 const SYSTEM_PROMPT = `You are a coding assistant running in a terminal.
 You can read, write, and edit files, list directories, and run shell commands.
 Prefer small, focused edits. Explain briefly what you are doing before using tools.
@@ -438,6 +447,8 @@ export class Agent {
       this.messages.push({ role: "user", content: userInput });
     }
 
+    let interruptions = 0;
+
     try {
       // Loop until the model stops requesting tools.
       while (true) {
@@ -468,37 +479,80 @@ export class Agent {
         let content = "";
         const toolCalls: ChatCompletionMessageToolCall[] = [];
 
-        for await (const chunk of stream) {
-          const delta = chunk.choices[0]?.delta;
-          if (!delta) continue;
-          if (delta.content) {
-            content += delta.content;
-            emit({ type: "text", text: delta.content });
-          }
-          if (delta.tool_calls) {
-            for (const tc of delta.tool_calls) {
-              const idx = tc.index ?? 0;
-              if (!toolCalls[idx]) {
-                toolCalls[idx] = {
-                  id: tc.id ?? "",
-                  type: "function",
-                  function: { name: "", arguments: "" },
-                };
+        // A transport failure part-way through the stream. `terminated` --
+        // undici's message for a socket closed under it -- carries no HTTP
+        // status, so `createWithRetry` cannot help: it only retries failures of
+        // the initial request. And by the time chunks have arrived the reply is
+        // already partly on the user's screen, so re-sending the request would
+        // show that text a second time.
+        //
+        // So keep what arrived and ask for the rest: the partial text is
+        // committed below like any other content, and the continuation builds
+        // on it instead of repeating it.
+        let interrupted = false;
+        try {
+          for await (const chunk of stream) {
+            const delta = chunk.choices[0]?.delta;
+            if (!delta) continue;
+            if (delta.content) {
+              content += delta.content;
+              emit({ type: "text", text: delta.content });
+            }
+            if (delta.tool_calls) {
+              for (const tc of delta.tool_calls) {
+                const idx = tc.index ?? 0;
+                if (!toolCalls[idx]) {
+                  toolCalls[idx] = {
+                    id: tc.id ?? "",
+                    type: "function",
+                    function: { name: "", arguments: "" },
+                  };
+                }
+                if (tc.id) toolCalls[idx].id = tc.id;
+                // Providers may attach opaque data to a tool call that must be
+                // echoed back on the next request. Gemini returns a
+                // `thought_signature` here and rejects the following turn without
+                // it ("Function call is missing a thought_signature"). Preserve
+                // whatever the provider sent rather than rebuilding the call from
+                // only id/name/arguments.
+                const extra = (tc as any).extra_content;
+                if (extra) (toolCalls[idx] as any).extra_content = extra;
+                if (tc.function?.name) toolCalls[idx].function.name += tc.function.name;
+                if (tc.function?.arguments)
+                  toolCalls[idx].function.arguments += tc.function.arguments;
               }
-              if (tc.id) toolCalls[idx].id = tc.id;
-              // Providers may attach opaque data to a tool call that must be
-              // echoed back on the next request. Gemini returns a
-              // `thought_signature` here and rejects the following turn without
-              // it ("Function call is missing a thought_signature"). Preserve
-              // whatever the provider sent rather than rebuilding the call from
-              // only id/name/arguments.
-              const extra = (tc as any).extra_content;
-              if (extra) (toolCalls[idx] as any).extra_content = extra;
-              if (tc.function?.name) toolCalls[idx].function.name += tc.function.name;
-              if (tc.function?.arguments)
-                toolCalls[idx].function.arguments += tc.function.arguments;
             }
           }
+        } catch (err) {
+          // Anything that is not a normal end of stream happened mid-reply.
+          // Rethrow if nothing arrived: with no partial text there is nothing
+          // to build on, and a clean retry of the whole request is both safe
+          // and simpler.
+          if (!content && !toolCalls.some(Boolean)) throw err;
+          interrupted = true;
+          emit({
+            type: "text",
+            text: `\n[connection dropped mid-reply; asking ${this.route().model} to continue]\n`,
+          });
+        }
+
+        // The reply was cut short, so the turn is not finished. Commit the text
+        // that did arrive and go round again: the model sees its own partial
+        // answer in the history and continues from there rather than repeating
+        // it. Any tool call captured so far is dropped -- the connection died
+        // mid-stream, so its arguments are very likely half-written, and a
+        // truncated call in the history breaks every later request (see below).
+        //
+        // Bounded, so a connection that dies repeatedly fails the turn instead
+        // of looping forever.
+        if (interrupted) {
+          if (++interruptions > MAX_INTERRUPTIONS) {
+            throw new Error(
+              `connection dropped ${interruptions} times mid-reply; giving up on this turn`
+            );
+          }
+          if (content) this.messages.push({ role: "assistant", content });
+          continue;
         }
 
         // Never commit a call whose arguments were cut off. Providers validate
