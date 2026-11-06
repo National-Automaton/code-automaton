@@ -3,6 +3,7 @@ import path from "node:path";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
+import { attachImage } from "./image.js";
 
 const execAsync = promisify(exec);
 
@@ -70,6 +71,24 @@ export const toolDefinitions: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "view_image",
+      description:
+        "Show an image file to yourself so you can see it. Use this for a " +
+        "screenshot or diagram on disk, or to look again at an image from " +
+        "earlier in the conversation ([image sent: <path>] in the history " +
+        "means it was sent once and is no longer in view).",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path to the image file." },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "bash",
       description:
         "Run a shell command in the current working directory and return stdout/stderr.",
@@ -87,6 +106,16 @@ export const toolDefinitions: ChatCompletionTool[] = [
 export interface ToolResult {
   ok: boolean;
   output: string;
+  /**
+   * Image paths the tool wants shown to the model.
+   *
+   * A tool cannot return pixels: the chat-completions schema allows image parts
+   * only on `user` messages, and a `tool` message's content is `string |
+   * TextPart[]`. So a tool that needs the model to *see* something returns the
+   * paths here, and the agent attaches them on a `user` message immediately
+   * after the tool result.
+   */
+  attach?: string[];
 }
 
 /**
@@ -230,12 +259,20 @@ export async function runTool(name: string, args: any): Promise<ToolResult> {
             ok: false,
             output:
               `refused to read ${args.path}: binary file (${buf.length} bytes). ` +
-              `read_file returns text only. For an image, ask the user to attach it ` +
-              `with Ctrl+V (or attach it yourself); for anything else, use a command ` +
-              `such as \`file\`, \`head -c 256\`, or \`strings\`.`,
+              `read_file returns text only. For an image, use view_image; for ` +
+              `anything else, use a command such as \`file\`, \`head -c 256\`, or ` +
+              `\`strings\`.`,
           };
         }
         return { ok: true, output: clampOutput(buf.toString("utf8")) };
+      }
+      case "view_image": {
+        const img = await attachImage(args.path);
+        return {
+          ok: true,
+          output: `showing ${img.path} (${img.mime}, ${(img.bytes / 1024).toFixed(1)} KB)`,
+          attach: [img.absPath],
+        };
       }
       case "write_file": {
         await fs.mkdir(path.dirname(path.resolve(args.path)), { recursive: true });
