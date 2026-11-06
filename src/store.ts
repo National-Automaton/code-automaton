@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
-import { stripImagesForStorage, restoreImagesForLoad } from "./image.js";
+import { stripImagesForStorage } from "./image.js";
 import { isValidJson } from "./agent.js";
 
 /**
@@ -148,16 +148,13 @@ export async function loadAll(): Promise<SessionRecord[]> {
       const raw = await fs.readFile(path.join(SESSIONS_DIR, name), "utf8");
       const parsed = JSON.parse(raw);
       if (isRecord(parsed)) {
-        // Re-read any screenshots referenced by placeholder text so a reloaded
-        // session still lets the model see what it was asked about.
+        // Screenshots are left as the `[image: <path>]` placeholders the save
+        // wrote, rather than being re-attached as pixels. An image anywhere in
+        // the history routes every request to the vision model, so restoring
+        // one on load pinned the session there for good -- restarting could not
+        // clear it, because the image came straight back out of the file. The
+        // model can ask for one with `view_image` when it actually needs it.
         parsed.messages = repairMalformedToolCalls(parsed.messages);
-        parsed.messages = await Promise.all(
-          parsed.messages.map(async (m: any) =>
-            Array.isArray(m?.content)
-              ? { ...m, content: await restoreImagesForLoad(m.content) }
-              : m
-          )
-        );
         records.push(parsed);
       }
     } catch {

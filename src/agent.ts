@@ -8,6 +8,8 @@ import { parallelBatch, runTool, toolDefinitions } from "./tools.js";
 import type { ToolResult } from "./tools.js";
 import {
   AttachedImage,
+  attachImage,
+  detachAnsweredImages,
   hasImagePart,
   imageParts,
 } from "./image.js";
@@ -236,7 +238,7 @@ export async function runToolCalls(
   run: (name: string, args: any) => Promise<ToolResult>,
   parallel = true,
   onRunning: (running: number) => void = () => {}
-): Promise<Array<{ id: string; name: string; ok: boolean; output: string }>> {
+): Promise<Array<{ id: string; name: string; ok: boolean; output: string; attach?: string[] }>> {
   const batch = parallel ? parallelBatch(calls) : [];
 
   // Announce every call before any of them runs, so the transcript shows the
@@ -254,7 +256,7 @@ export async function runToolCalls(
   let running = batch.length;
   onRunning(running);
 
-  const results: Array<{ id: string; name: string; ok: boolean; output: string }> = [];
+  const results: Array<{ id: string; name: string; ok: boolean; output: string; attach?: string[] }> = [];
   for (let i = 0; i < calls.length; i++) {
     const call = calls[i];
     let pending = started.get(i);
@@ -269,7 +271,13 @@ export async function runToolCalls(
     running--;
     onRunning(running);
     emit({ type: "tool_result", name: call.name, ok: result.ok, output: result.output });
-    results.push({ id: call.id, name: call.name, ok: result.ok, output: result.output });
+    results.push({
+      id: call.id,
+      name: call.name,
+      ok: result.ok,
+      output: result.output,
+      ...(result.attach?.length ? { attach: result.attach } : {}),
+    });
   }
   return results;
 }
@@ -367,6 +375,48 @@ export class Agent {
     this.pendingSteers = [];
     for (const text of queued) this.messages.push({ role: "user", content: text });
     return queued;
+  }
+
+  /**
+   * Attach images a tool asked to show, on the `user` message carrying them.
+   *
+   * A tool cannot return pixels -- the schema allows image parts only on `user`
+   * messages -- so `view_image` names the files and they are attached here,
+   * right after the tool results. This is the one place an image re-enters the
+   * history after a turn has been answered, and it is deliberate: the model
+   * asked to see it, so this request belongs on the vision model.
+   */
+  private async attachForView(paths: string[]): Promise<void> {
+    const parts: any[] = [{ type: "text", text: "[image shown]" }];
+    for (const p of paths) {
+      try {
+        const img = await attachImage(p);
+        for (const part of await imageParts([img])) {
+          parts.push({ ...part, image_path: img.path });
+        }
+      } catch (err: any) {
+        parts.push({ type: "text", text: `[could not show ${p}: ${err?.message ?? err}]` });
+      }
+    }
+    if (parts.length > 1) this.messages.push({ role: "user", content: parts });
+  }
+
+  /**
+   * Swap every answered image in the history for a text marker.
+   *
+   * Called when a turn ends. Until then the image must stay: the whole history
+   * is re-sent on each step of the loop, so a turn that makes several tool
+   * calls needs the pixels on every one. Once the turn is answered nothing
+   * reads them again, and keeping them would keep `needsVision()` true for the
+   * rest of the session -- every later text-only turn routed to the vision
+   * model. `view_image` can bring an image back when it is actually wanted.
+   */
+  private detachImages(): void {
+    for (const message of this.messages) {
+      const any = message as any;
+      const detached = detachAnsweredImages(any.content);
+      if (detached !== any.content) any.content = detached;
+    }
   }
 
   private needsVision(): boolean {
@@ -627,6 +677,10 @@ export class Agent {
       // non-zero once `send` has returned.
       if (this.runningTools !== 0) this.toolSeq++;
       this.runningTools = 0;
+      // The turn is answered, so any screenshot it carried has been seen. Done
+      // in `finally` so a failed or abandoned turn does not leave the session
+      // pinned to the vision model either.
+      this.detachImages();
     }
   }
 

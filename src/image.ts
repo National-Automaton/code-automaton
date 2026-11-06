@@ -7,6 +7,8 @@
  * `string | TextPart[]`, which cannot carry pixels.
  */
 import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 
 /** Media types the API accepts for image parts. */
@@ -42,6 +44,52 @@ function mimeFor(p: string): string {
   return mime;
 }
 
+/**
+ * Where cached copies of attached images live.
+ *
+ * Clipboard captures are written to the OS temp directory, which is cleaned up
+ * routinely -- that is why two of the sessions on this machine carry
+ * `[image: ...]` placeholders whose files are long gone, so the screenshot
+ * cannot be shown again even though the conversation records that one was sent.
+ * Keeping a copy under `~/.coda` makes an attachment survivable, which is what
+ * lets `view_image` re-read it later.
+ *
+ * `CODA_IMAGES_DIR` overrides it, the same way `CODA_SESSIONS_DIR` does.
+ */
+export const IMAGES_DIR = process.env.CODA_IMAGES_DIR
+  ? path.resolve(process.env.CODA_IMAGES_DIR)
+  : path.join(os.homedir(), ".coda", "images");
+
+/** Content-addressed name for an image, so a repeated capture is stored once. */
+function cacheName(bytes: Buffer, ext: string): string {
+  return createHash("sha256").update(bytes).digest("hex").slice(0, 32) + ext;
+}
+
+/**
+ * Copy an image into `IMAGES_DIR` and return the cached path.
+ *
+ * Content-addressed, so attaching the same screenshot twice costs one file.
+ * Best-effort: if the copy fails the original path is returned and everything
+ * still works, minus the ability to re-read the image after the original goes
+ * away.
+ */
+export async function cacheImage(absPath: string): Promise<string> {
+  try {
+    const bytes = await fs.readFile(absPath);
+    const ext = path.extname(absPath).toLowerCase() || ".png";
+    const dest = path.join(IMAGES_DIR, cacheName(bytes, ext));
+    await fs.mkdir(IMAGES_DIR, { recursive: true });
+    // `wx` would fail on a second attach of the same bytes; the content is the
+    // name, so an existing file is already the right one.
+    await fs.writeFile(dest, bytes, { flag: "wx" }).catch((err) => {
+      if (err?.code !== "EEXIST") throw err;
+    });
+    return dest;
+  } catch {
+    return absPath;
+  }
+}
+
 /** Check a path can be attached, without reading the whole file. */
 export async function attachImage(p: string): Promise<AttachedImage> {
   const absPath = path.resolve(p);
@@ -60,7 +108,12 @@ export async function attachImage(p: string): Promise<AttachedImage> {
     throw new ImageError(`image too large: ${mb(stat.size)} MB (limit ${mb(MAX_IMAGE_BYTES)} MB)`);
   }
 
-  return { path: p, absPath, mime, bytes: stat.size };
+  // Keep a durable copy. The path recorded on the message points at it rather
+  // than at the caller's file, which for a clipboard capture is a temp file the
+  // OS will delete -- taking the screenshot with it and leaving the session
+  // unable to show what was sent.
+  const cached = await cacheImage(absPath);
+  return { path: cached, absPath: cached, mime, bytes: stat.size };
 }
 
 /** Read an attached image as a `data:` URL. */
@@ -85,6 +138,30 @@ export async function imageParts(
   return parts;
 }
 
+/**
+ * Replace answered images with a marker so the session can go back to the text
+ * model.
+ *
+ * The pixels are only needed until the turn that carried them is answered. Left
+ * in the history they keep `Agent.needsVision()` true, which routes every later
+ * request to the vision model for the rest of the session's life. The path is
+ * kept in the marker so `view_image` can pull the image back when it is wanted.
+ */
+export function detachAnsweredImages(content: unknown): unknown {
+  if (!Array.isArray(content)) return content;
+  let changed = false;
+  const detached = content.map((part: any) => {
+    if (part && part.type === "image_url") {
+      changed = true;
+      const label = typeof part.image_path === "string" ? part.image_path : "(image)";
+      return { type: "text", text: `[image sent: ${label}]` };
+    }
+    return part;
+  });
+  // Same array back when nothing changed, so callers can compare by identity.
+  return changed ? detached : content;
+}
+
 /** True if a message's content contains an image part. */
 export function hasImagePart(content: unknown): boolean {
   if (!Array.isArray(content)) return false;
@@ -98,37 +175,11 @@ export function hasImagePart(content: unknown): boolean {
  *
  * Base64 images would otherwise be written into every session file forever
  * (a 1 MB screenshot is ~1.4 MB of JSON). The path is kept so the attachment
- * can be re-read when the session is reloaded.
- */
-/**
- * Re-attach images that were replaced by `stripImagesForStorage`.
+ * can be found again -- by `view_image`, when the model wants to look at it.
  *
- * Sessions store a `[image: path]` placeholder instead of base64. Without this
- * the reloaded conversation would only contain the text, so the model would
- * silently lose the screenshot it was originally asked about. A missing file
- * degrades to the placeholder rather than failing the load.
+ * These placeholders are *not* turned back into pixels on load; see
+ * `keepImagePlaceholders`.
  */
-export async function restoreImagesForLoad(content: unknown): Promise<unknown> {
-  if (!Array.isArray(content)) return content;
-  const restored: any[] = [];
-  for (const part of content) {
-    const m = typeof (part as any)?.text === "string"
-      ? /^\[image: (.+)\]$/.exec((part as any).text)
-      : null;
-    if (m) {
-      try {
-        const img = await attachImage(m[1]);
-        restored.push({ type: "image_url", image_url: { url: await toDataUrl(img) }, image_path: img.path });
-        continue;
-      } catch {
-        // File moved or deleted: keep the placeholder as plain text.
-      }
-    }
-    restored.push(part);
-  }
-  return restored;
-}
-
 export function stripImagesForStorage(content: unknown): unknown {
   if (!Array.isArray(content)) return content;
   return content.map((part: any) => {
