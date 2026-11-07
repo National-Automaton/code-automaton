@@ -342,6 +342,56 @@ Slash commands are typed into the input and sent with Enter.
 | `/image <path>` | Attach an image file (see [Images](#images)) |
 | `/rename <title>` | Rename the current session. With no title, opens the interactive title editor (same as `Alt+R`) |
 | `/model` | Choose this session's text and image model (see [Models](#models)) |
+| `/secret` | Manage the credentials vault (see [Credentials vault](#credentials-vault)) |
+
+### Credentials vault
+
+`coda` needs credentials for things beyond the model API — an app password for
+Gmail, a token for another service. The vault holds them so they can be used
+without ever being shown.
+
+```
+/secret add gmail          # prompts; the value is typed hidden
+/secret list               # names and lengths only
+/secret remove gmail
+/secret exists gmail
+```
+
+The value is entered at a masked prompt:
+
+```
+secret "gmail" — value hidden:
+> ••••••••••••••••••••••
+○ idle · 1 tool   secret · Enter save · Esc cancel · input hidden
+```
+
+**How it protects the value**
+
+- **Typed hidden.** The field draws one `•` per character. The value is never
+  echoed to the terminal, so it cannot reach a scrollback buffer, a screen
+  recording, or a screenshot. Only the length is visible, which is unavoidable
+  if the caret is to point anywhere.
+- **Never printed.** `/secret list` reports names and character counts. There is
+  no "first four characters" hint — that convenience is exactly the leak the
+  vault exists to avoid.
+- **Never in the transcript.** The transcript is plain JSON written to
+  `~/.coda/sessions/` on every turn and re-sent to the model as history, so it
+  is the most likely place for a credential to end up. Tool output, assistant
+  replies, and system notes are all scrubbed: any tracked value is replaced with
+  `[redacted]` on the way in.
+- **Paste is refused** in the prompt. A pasted value also lands in the
+  terminal's paste stream and the clipboard history, which defeats the point.
+- **Separate store.** `~/.config/coda/secrets/` (mode `700`, files `600`) is not
+  the session directory, so a session file can never contain a credential.
+
+**What it does not do.** These are plaintext files with `0600` permissions.
+Anyone who can read your user's files can read the vault. Encrypting it needs a
+key held somewhere the process cannot simply read — Windows DPAPI or the kernel
+keyring — which is a real upgrade and deliberately not faked with home-grown
+crypto. Treat the file permissions as the boundary.
+
+Names are lowercase letters, digits, `.`, `_` and `-` (max 64), because the name
+becomes a filename. `--force` replaces an existing secret.
 
 ### Models
 

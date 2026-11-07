@@ -9,6 +9,18 @@ import type { SessionRecord } from "./store.js";
 import { loadCatalog, bareId } from "./models.js";
 import type { ModelCatalog } from "./models.js";
 import {
+  deleteSecret,
+  describe,
+  hasSecret,
+  isValidName,
+  listSecrets,
+  normaliseName,
+  redact,
+  SECRETS_DIR,
+  setSecret,
+  trackSecret,
+} from "./secrets.js";
+import {
   attachImage,
   clipboardContents,
   clipboardImagePath,
@@ -81,6 +93,19 @@ export class App {
    * the one whose title you were editing.
    */
   private rename: { id: string; buffer: LineBuffer; fromPicker: boolean } | null = null;
+  /**
+   * The secret prompt, when open.
+   *
+   * Kept separate from `rename` and the other modals because a secret must not
+   * go through the same paths: the value lives in this buffer only, is never
+   * copied into the chat input, and is discarded on Esc. `buffer` is a
+   * LineBuffer like the others, but everything that reads it renders masked
+   * (see `Screen`'s `password` state).
+   */
+  private secretPrompt: {
+    name: string;
+    buffer: LineBuffer;
+  } | null = null;
   /**
    * Lines scrolled back from the tail of the transcript.
    *
@@ -279,6 +304,15 @@ export class App {
       modelPicker: this.modelPicker
         ? this.modelPickerState(this.modelPicker)
         : null,
+      // Only the length crosses into the renderer: the value itself never
+      // leaves the buffer, so it cannot be drawn even by mistake.
+      password: this.secretPrompt
+        ? {
+            label: `secret "${this.secretPrompt.name}" — value hidden:`,
+            length: this.secretPrompt.buffer.value.length,
+            cursor: this.secretPrompt.buffer.cursor,
+          }
+        : null,
     });
   }
 
@@ -356,7 +390,8 @@ export class App {
 
   private onKey(k: Key): void {
     if (this.quitting) return;
-    if (this.modelPicker) this.onModelPickerKey(k);
+    if (this.secretPrompt) this.onSecretKey(k);
+    else if (this.modelPicker) this.onModelPickerKey(k);
     else if (this.rename) this.onRenameKey(k);
     else if (this.picker) this.onPickerKey(k);
     else this.onChatKey(k);
@@ -552,6 +587,185 @@ export class App {
 
     this.modelPicker = { catalog, index: idx, visionIndex };
     this.screen.resetModelWindow();
+    this.requestRender();
+  }
+
+  /**
+   * Keys while the secret prompt is open.
+   *
+   * Everything here exists to keep the value out of sight. Paste is refused: a
+   * pasted credential would sit in the terminal's own paste stream and in the
+   * clipboard history, which defeats the prompt. The value is never echoed, is
+   * not rendered (the screen draws bullets), and is not put in the transcript
+   * on Enter -- only that a secret was saved.
+   */
+  private onSecretKey(k: Key): void {
+    const p = this.secretPrompt!;
+    const b = p.buffer;
+
+    switch (k.type) {
+      case "enter": {
+        const value = b.value;
+        this.secretPrompt = null;
+        if (value === "") {
+          this.systemNote(`secret ${p.name}: cancelled (nothing entered)`);
+          this.requestRender();
+          return;
+        }
+        // Track before storing: if the write fails, the value is still masked
+        // from the transcript for the rest of this process.
+        trackSecret(value);
+        const ok = setSecret(p.name, value);
+        this.systemNote(
+          ok
+            ? `secret ${p.name}: saved (${value.length} chars, mode 600)`
+            : `secret ${p.name}: could not be saved`
+        );
+        this.requestRender();
+        return;
+      }
+      case "escape":
+        this.secretPrompt = null;
+        this.systemNote(`secret ${p.name}: cancelled`);
+        this.requestRender();
+        return;
+      case "backspace":
+        b.backspace();
+        break;
+      case "delete":
+        b.deleteForward();
+        break;
+      case "left":
+        b.left();
+        break;
+      case "right":
+        b.right();
+        break;
+      case "home":
+        b.home();
+        break;
+      case "end":
+        b.end();
+        break;
+      case "ctrl":
+        if (k.ch === "c") {
+          this.quit();
+          return;
+        }
+        if (k.ch === "a") b.home();
+        else if (k.ch === "e") b.end();
+        else if (k.ch === "u") b.deleteToStart();
+        else if (k.ch === "k") b.deleteToEnd();
+        else if (k.ch === "w") b.deleteWordLeft();
+        break;
+      case "alt":
+        if (k.ch === "b") b.wordLeft();
+        else if (k.ch === "f") b.wordRight();
+        else if (k.ch === "d") b.deleteWordRight();
+        else if (k.ch === "backspace") b.deleteWordLeft();
+        break;
+      case "char":
+        b.insert(k.ch);
+        break;
+      case "paste":
+        // Refused deliberately -- see the method comment. Say so, or it looks
+        // like the terminal is broken.
+        this.systemNote("secret: paste is disabled here; type the value");
+        break;
+      // up/down/tab/wheel do nothing while a secret is being typed.
+    }
+    this.requestRender();
+  }
+
+  /** Open the prompt for a named secret. */
+  private promptSecret(name: string): void {
+    const n = normaliseName(name);
+    if (!isValidName(n)) {
+      this.systemNote(
+        `invalid secret name: ${JSON.stringify(name)}  (lowercase letters, digits, . _ -; max 64)`
+      );
+      this.requestRender();
+      return;
+    }
+    this.secretPrompt = { name: n, buffer: new LineBuffer() };
+    this.requestRender();
+  }
+
+  /** `/secret` — list, add, remove. Values are never printed. */
+  private handleSecretCommand(arg: string): void {
+    const [sub, ...rest] = arg.split(/\s+/).filter(Boolean);
+    const name = rest.join(" ");
+
+    if (!sub || sub === "list") {
+      const names = listSecrets();
+      if (names.length === 0) {
+        this.systemNote(
+          "credentials vault is empty.   /secret add <name>  to add one\n" +
+            `vault: ${SECRETS_DIR}  (mode 700, files 600)`
+        );
+      } else {
+        const lines = names.map((n) => {
+          const d = describe(n);
+          return `  ${d.name.padEnd(24)} ${d.chars} chars`;
+        });
+        this.systemNote(`credentials vault (${SECRETS_DIR}):\n` + lines.join("\n"));
+      }
+      this.requestRender();
+      return;
+    }
+
+    if (sub === "add" || sub === "set") {
+      if (!name) {
+        this.systemNote("usage: /secret add <name>   (the value is asked for at a hidden prompt)");
+        this.requestRender();
+        return;
+      }
+      // `--force` is a flag, not part of the name.
+      const words = rest.filter((w) => w !== "--force");
+      const target = words[0] ?? "";
+      const force = words.length !== rest.length;
+      if (words.length !== 1) {
+        this.systemNote(
+          "usage: /secret add <name> [--force]   (a name is one word: lowercase letters, digits, . _ -)"
+        );
+        this.requestRender();
+        return;
+      }
+      if (hasSecret(target) && !force) {
+        this.systemNote(
+          `secret ${normaliseName(target)} already exists.  ` +
+            `/secret add ${target} --force  to replace it`
+        );
+        this.requestRender();
+        return;
+      }
+      this.promptSecret(target);
+      return;
+    }
+
+    if (sub === "remove" || sub === "delete" || sub === "rm") {
+      if (!name) {
+        this.systemNote("usage: /secret remove <name>");
+        this.requestRender();
+        return;
+      }
+      const n = normaliseName(name);
+      const ok = deleteSecret(n);
+      this.systemNote(ok ? `secret ${n}: removed` : `secret ${n}: not found`);
+      this.requestRender();
+      return;
+    }
+
+    if (sub === "exists" || sub === "has") {
+      const n = normaliseName(name);
+      this.systemNote(hasSecret(n) ? `secret ${n}: present` : `secret ${n}: absent`);
+      this.requestRender();
+      return;
+    }
+
+    this.systemNote(
+      "usage: /secret [list | add <name> [--force] | remove <name> | exists <name>]"
+    );
     this.requestRender();
   }
 
@@ -1066,6 +1280,7 @@ export class App {
         "  /image <path>       Attach an image file to your next message",
         "  /rename <title>     Rename the current session (no title: edit it interactively)",
         "  /model              Choose this session's text and image model",
+        "  /secret <add|list|remove>  Manage the credentials vault (values entered hidden)",
         "  /prune-images       Delete cached screenshots no session refers to",
         "",
         "Keys:",
@@ -1100,7 +1315,10 @@ export class App {
 
   /** Append a local, informational line to the current transcript. */
   private systemNote(text: string): void {
-    this.current().entries.push({ role: "tool", name: "coda", ok: true, text });
+    // Redacted on the way in: a note is transcript text, it is saved to the
+    // session file, and it is re-sent to the model as history. Scrubbing here
+    // covers every note, including ones built from a command's output.
+    this.current().entries.push({ role: "tool", name: "coda", ok: true, text: redact(text) });
     // The note lands at the tail. If the reader has deliberately scrolled back
     // into history, leave their offset alone: a note arriving (an attachment, a
     // status message) should not yank the transcript out from under them.
@@ -1435,6 +1653,15 @@ export class App {
     if (text === "/model") {
       clrInput();
       void this.openModelPicker();
+      return true;
+    }
+    // `/secret` manages credentials. The value is always entered at a masked
+    // prompt, never as an argument: an argument would be echoed into the
+    // input line, kept in the session's transcript, and saved to disk.
+    if (text === "/secret" || text.startsWith("/secret ")) {
+      const arg = text.slice("/secret".length).trim();
+      clrInput();
+      this.handleSecretCommand(arg);
       return true;
     }
     if (text === "/quit" || text === "/exit") {

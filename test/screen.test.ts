@@ -881,4 +881,42 @@ for (const [visionIndex, expected] of [
   assert.ok(!/✓ deepseek-flash/.test(text), "an unselected row is never ticked");
 }
 
+// The password field: the credential must not appear in the frame at all.
+// This is the one invariant that matters most -- a value drawn here reaches the
+// terminal, and from there a scrollback buffer, a screen recording or a
+// screenshot.
+{
+  const secret = "hunter2-SECRET-abcd1234";
+  const screen = screenAt(80, 24);
+  const frame = renderAt(80, 24, screen, {
+    ...chatState("", 0),
+    password: {
+      label: 'secret "gmail" — value hidden:',
+      length: secret.length,
+      cursor: secret.length,
+    },
+  });
+  const all = frame.rows.join("\n");
+  assert.ok(!all.includes(secret), `the secret appeared in the frame:\n${all}`);
+  // No fragment either: a partial mask (first/last few chars) is still a leak.
+  assert.ok(!all.includes("hunter2"), "no prefix of the secret may be drawn");
+  assert.ok(!all.includes("abcd1234"), "no suffix of the secret may be drawn");
+  // The mask is drawn, so the user can see that something was typed.
+  assert.ok(all.includes("•"), "the field should show bullets");
+  assert.ok(all.includes("value hidden"), "the prompt should say it is hidden");
+  assert.ok(all.includes("Esc cancel"), "the hint should say how to cancel");
+  checkFrame(frame, { cols: 80, rows: 24 }, "password");
+}
+
+// The masked field must fit the same frame budget as any other input: the
+// label adds a row, and an unaccounted row pushes the status line off screen.
+for (const size of SIZES) {
+  const screen = screenAt(size.cols, size.rows);
+  const frame = renderAt(size.cols, size.rows, screen, {
+    ...chatState("", 0),
+    password: { label: 'secret "gmail" — value hidden:', length: 32, cursor: 32 },
+  });
+  checkFrame(frame, size, `password ${size.cols}x${size.rows}`);
+}
+
 process.stderr.write("screen: all frame invariants hold\n");
