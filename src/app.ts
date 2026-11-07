@@ -107,6 +107,18 @@ export class App {
     buffer: LineBuffer;
   } | null = null;
   /**
+   * A pending `use_secret` approval, when the agent is waiting on the user.
+   *
+   * The resolver is the promise the agent is blocked on: nothing runs until it
+   * is called, so the value cannot be spent by accident. Kept as state rather
+   * than a plain await because the answer arrives through the key handler.
+   */
+  private approval: {
+    summary: string;
+    secrets: string[];
+    resolve: (answer: "yes" | "no" | "always") => void;
+  } | null = null;
+  /**
    * Lines scrolled back from the tail of the transcript.
    *
    * Kept for the key handling, which thinks in "lines back". The *view* is not
@@ -306,6 +318,7 @@ export class App {
         : null,
       // Only the length crosses into the renderer: the value itself never
       // leaves the buffer, so it cannot be drawn even by mistake.
+      approval: this.approval ? { summary: this.approval.summary } : null,
       password: this.secretPrompt
         ? {
             label: `secret "${this.secretPrompt.name}" — value hidden:`,
@@ -390,7 +403,8 @@ export class App {
 
   private onKey(k: Key): void {
     if (this.quitting) return;
-    if (this.secretPrompt) this.onSecretKey(k);
+    if (this.approval) this.onApprovalKey(k);
+    else if (this.secretPrompt) this.onSecretKey(k);
     else if (this.modelPicker) this.onModelPickerKey(k);
     else if (this.rename) this.onRenameKey(k);
     else if (this.picker) this.onPickerKey(k);
@@ -769,6 +783,56 @@ export class App {
     this.requestRender();
   }
 
+  /**
+   * Keys while a credential approval is pending.
+   *
+   * `y` approves once, `a` approves for the rest of this session, anything that
+   * is not a yes (`n`, `Esc`, `Ctrl+C`) refuses. Refusing on an unrecognised key
+   * is deliberate: this prompt blocks a credential being spent, so the safe
+   * default for an ambiguous keypress is "no".
+   */
+  private onApprovalKey(k: Key): void {
+    const a = this.approval!;
+    let answer: "yes" | "no" | "always" | null = null;
+
+    if (k.type === "char") {
+      const c = k.ch.toLowerCase();
+      if (c === "y") answer = "yes";
+      else if (c === "a") answer = "always";
+      else if (c === "n") answer = "no";
+    } else if (k.type === "enter") {
+      answer = "no"; // Enter is not a yes: it is too easy to hit by reflex
+    } else if (k.type === "escape") {
+      answer = "no";
+    } else if (k.type === "ctrl" && k.ch === "c") {
+      answer = "no";
+    }
+
+    if (answer === null) return; // ignore other keys and keep waiting
+
+    this.approval = null;
+    if (answer === "always") {
+      this.systemNote(`approved ${a.secrets.join(", ")} for this session`);
+    } else if (answer === "no") {
+      this.systemNote(`declined ${a.secrets.join(", ")}`);
+    } else {
+      this.systemNote(`approved ${a.secrets.join(", ")} (once)`);
+    }
+    a.resolve(answer);
+    this.requestRender();
+  }
+
+  /** The prompt handed to the agent: shows what is about to run, then waits. */
+  private askApproval(
+    summary: string,
+    secrets: string[]
+  ): Promise<"yes" | "no" | "always"> {
+    return new Promise((resolve) => {
+      this.approval = { summary, secrets, resolve };
+      this.requestRender();
+    });
+  }
+
   private onPickerKey(k: Key): void {    const p = this.picker!;
     const items = this.pickerSessions();
     const n = items.length;
@@ -996,7 +1060,12 @@ export class App {
     this.input.clear();
     this.scrollToTail();
     if (session.status === "idle") {
-      void session.run(text, () => this.requestRender(), images);
+      void session.run(
+        text,
+        () => this.requestRender(),
+        images,
+        (summary, secrets) => this.askApproval(summary, secrets)
+      );
     }
   }
 
@@ -1580,7 +1649,12 @@ export class App {
     } else {
       this.input.clear();
       this.scrollToTail(); // jump back to the tail so you see the reply
-      void session.run(text, () => this.requestRender(), images);
+      void session.run(
+        text,
+        () => this.requestRender(),
+        images,
+        (summary, secrets) => this.askApproval(summary, secrets)
+      );
     }
     this.requestRender();
   }

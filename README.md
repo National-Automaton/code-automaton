@@ -393,6 +393,47 @@ crypto. Treat the file permissions as the boundary.
 Names are lowercase letters, digits, `.`, `_` and `-` (max 64), because the name
 becomes a filename. `--force` replaces an existing secret.
 
+#### Spending a credential: `use_secret`
+
+The agent can *use* a credential without seeing it. It writes the command with
+`{{secret:NAME}}` where the value belongs, and the host substitutes it after the
+model has finished writing:
+
+```jsonc
+{ "command": ["curl", "--user", "admin:{{secret:wp-app-password}}",
+              "https://site.test/wp-json/wp/v2/posts"] }
+```
+
+- **No shell.** The command is a program and arguments, run with `spawn` and
+  `shell: false`, so a substituted value cannot be re-parsed as shell syntax.
+- **Never in `argv` when it can be avoided.** `stdin` and `secret` are available
+  for programs that read a password from their input, which keeps the value out
+  of `ps` entirely. A value that reaches the argument list *is* briefly visible
+  in the process table — that is a limitation of programs that only accept
+  credentials as arguments, not something the tool can hide.
+- **Refuses literal secrets.** If the command contains a known value as written,
+  the call fails and the model is told to use a placeholder.
+- **Every use is confirmed.** The prompt names the secret and the command as
+  written — never a value — and nothing runs until you answer:
+
+  ```
+  Use credential wp-app-password to run:
+    curl --user admin {{secret:wp-app-password}} https://site.test/wp-json/…
+  run with this credential?   y = once · a = always this session · n / Esc = no
+  ```
+
+  `y` approves this call, `a` approves that secret for the rest of the session,
+  `n`/`Esc` declines. Anything that is not a yes declines, including Enter —
+  this prompt is the only thing between the agent and a credential.
+- **Approval is per session and per secret.** Approving one credential does not
+  approve another, and a new session starts over.
+- **Output is scrubbed.** A child that echoes its credential still produces a
+  redacted tool result.
+
+`write_file` and `edit_file` also refuse content containing a known secret. That
+closes the easy accident; it does not stop a subprocess redirecting its own
+output to a file, so it is not a sandbox.
+
 ### Models
 
 `/model` opens a full-screen list of the models available on the configured

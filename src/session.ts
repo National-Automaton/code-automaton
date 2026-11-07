@@ -202,9 +202,15 @@ export class Session {
   async run(
     input: string,
     onUpdate: () => void,
-    images: AttachedImage[] = []
+    images: AttachedImage[] = [],
+    confirm?: (summary: string, secrets: string[]) => Promise<"yes" | "no" | "always">
   ): Promise<void> {
     this.status = "thinking";
+    // The approval prompt belongs to the UI, not to the agent: `Agent` has no
+    // terminal. Installing it here means a turn started from the app can ask,
+    // while a programmatic run (tests, tooling) simply cannot approve anything
+    // and `use_secret` refuses.
+    this.agent.setConfirm(confirm ?? null);
     // Show the attachment in the transcript so it is clear what was sent; the
     // pixels themselves never go in the entry list.
     const label = images.length

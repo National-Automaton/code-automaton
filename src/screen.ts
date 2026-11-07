@@ -184,6 +184,14 @@ export interface RenderState {
    */
   password?: { label: string; length: number; cursor: number } | null;
   /**
+   * Set while a `use_secret` call is waiting for the user's approval.
+   *
+   * Drawn instead of the input line, above the status line: nothing the user
+   * types here reaches the chat input, so a stray keystroke cannot be sent to
+   * the model while a credential is pending.
+   */
+  approval?: { summary: string } | null;
+  /**
    * When set, the `/model` overlay is shown full-screen -- the same frame the
    * session picker takes over.
    *
@@ -616,11 +624,15 @@ export class Screen {
     // A password prompt adds a label row above the field, so it is budgeted
     // here too -- otherwise the frame is one row taller than the transcript
     // allowance and the status line scrolls away.
+    // An approval prompt replaces the input line and adds its own rows (the
+    // summary plus the key hint). Budgeted here or the frame grows past the
+    // terminal and scrolls, pushing the header into scrollback.
+    const approvalRows = s.approval ? s.approval.summary.split("\n").length + 1 : 0;
     const viewport = this.viewportRowsFor(
       s.input,
       width,
       height,
-      s.password ? 1 : 0
+      (s.password ? 1 : 0) + approvalRows
     );
 
     const all = this.styledEntries(s.entries, width);
@@ -702,6 +714,18 @@ export class Screen {
     // masked field is indistinguishable from a broken input line.
     if (s.password) {
       out.push(DIM + s.password.label.slice(0, Math.max(1, width - 1)) + RESET);
+    }
+    // An approval prompt replaces the input line: there is no text field, so a
+    // stray keystroke cannot be sent to the model while a credential is
+    // pending. The status line below still reports the turn is running.
+    if (s.approval) {
+      const lines = [
+        ...s.approval.summary.split("\n"),
+        "run with this credential?   y = once · a = always this session · n / Esc = no",
+      ];
+      for (const line of lines) {
+        out.push(YELLOW + line.slice(0, Math.max(1, width - 1)) + RESET);
+      }
     }
     const inputWidth = Math.max(10, width - 3);
     // A password field draws one bullet per character instead of the text, so
@@ -788,6 +812,12 @@ export class Screen {
     // header(0), blank(1), transcript(2..viewport+1), blank(viewport+2),
     // then the input from viewport+3.
     const inputFirstRow = viewport + 3;
+    // An approval prompt has no text field, so the caret is parked and hidden
+    // rather than left blinking on a line that cannot be typed into.
+    if (s.approval) {
+      stdout.write(ESC + "1;1H" + HIDE_CURSOR);
+      return;
+    }
     this.placeCursor(width, inputFirstRow + (curRow - firstVisibleRow), 2 + curCol);
   }
 

@@ -919,4 +919,25 @@ for (const size of SIZES) {
   checkFrame(frame, size, `password ${size.cols}x${size.rows}`);
 }
 
+// The approval prompt replaces the input line, so a stray keystroke cannot be
+// sent to the model while a credential is pending. It must also fit the frame
+// at every width -- the summary is model-supplied text.
+for (const size of SIZES) {
+  const screen = screenAt(size.cols, size.rows);
+  const frame = renderAt(size.cols, size.rows, screen, {
+    ...chatState("", 0),
+    approval: {
+      summary:
+        "Use credential wp-app-password to run:\n  curl --user admin {{secret:wp-app-password}} https://example.test/wp-json/",
+    },
+  });
+  checkFrame(frame, size, `approval ${size.cols}x${size.rows}`);
+  const text = frame.rows.map(strip).join("\n");
+  assert.ok(/credential/.test(text), `${size.cols}x${size.rows}: the approval is not shown`);
+  assert.ok(/y = once/.test(text), "the keys are named");
+  // The caret is hidden: there is no field to type into.
+  assert.equal(frame.caret, null, "no caret is placed during an approval");
+  assert.ok(frame.caretHidden, "the caret is explicitly hidden");
+}
+
 process.stderr.write("screen: all frame invariants hold\n");
