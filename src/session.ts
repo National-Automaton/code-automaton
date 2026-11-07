@@ -2,6 +2,53 @@ import { Agent, AgentEvent } from "./agent.js";
 import type { AttachedImage } from "./image.js";
 import { Config } from "./config.js";
 import { SessionLock, acquireLock, describeHolder } from "./lock.js";
+import { redact } from "./secrets.js";
+
+/**
+ * Append a streamed agent event to a transcript.
+ *
+ * Extracted from `Session.run` so the scrubbing can be tested directly: every
+ * path that puts agent output into the entry list goes through here, and each
+ * one redacts. A credential that reached `entries` would be written to the
+ * session file on disk and re-sent to the model as history on every later turn,
+ * so this is the boundary that matters most.
+ *
+ * `buf` holds the assistant bubble currently being appended to; it is returned
+ * (possibly a new one) so the caller keeps accumulating into the same entry.
+ */
+export function applyEvent(
+  entries: Entry[],
+  ev: AgentEvent,
+  buf: Entry | null
+): Entry | null {
+  switch (ev.type) {
+    case "text": {
+      const target = buf ?? { role: "assistant", text: "" };
+      if (!buf) entries.push(target);
+      target.text += redact(ev.text);
+      return target;
+    }
+    case "tool_start":
+      entries.push({ role: "tool", name: ev.name, text: redact(JSON.stringify(ev.args)) });
+      return null;
+    case "steer":
+      entries.push({ role: "user", text: redact(`(mid-turn) ${ev.text}`) });
+      return null;
+    case "tool_result": {
+      const last = entries[entries.length - 1];
+      if (last && last.role === "tool" && last.name === ev.name) {
+        last.ok = ev.ok;
+        last.text = redact(ev.output);
+      }
+      return buf;
+    }
+    case "done":
+    case "error":
+      return null;
+    default:
+      return buf;
+  }
+}
 import {
   DEFAULT_TITLE,
   Entry,
@@ -155,9 +202,15 @@ export class Session {
   async run(
     input: string,
     onUpdate: () => void,
-    images: AttachedImage[] = []
+    images: AttachedImage[] = [],
+    confirm?: (summary: string, secrets: string[]) => Promise<"yes" | "no" | "always">
   ): Promise<void> {
     this.status = "thinking";
+    // The approval prompt belongs to the UI, not to the agent: `Agent` has no
+    // terminal. Installing it here means a turn started from the app can ask,
+    // while a programmatic run (tests, tooling) simply cannot approve anything
+    // and `use_secret` refuses.
+    this.agent.setConfirm(confirm ?? null);
     // Show the attachment in the transcript so it is clear what was sent; the
     // pixels themselves never go in the entry list.
     const label = images.length
@@ -174,46 +227,7 @@ export class Session {
     let assistantBuf: Entry | null = null;
 
     const emit = (ev: AgentEvent) => {
-      switch (ev.type) {
-        case "text": {
-          if (!assistantBuf) {
-            assistantBuf = { role: "assistant", text: "" };
-            this.entries.push(assistantBuf);
-          }
-          assistantBuf.text += ev.text;
-          break;
-        }
-        case "tool_start": {
-          assistantBuf = null; // next text starts a fresh assistant bubble
-          this.entries.push({
-            role: "tool",
-            name: ev.name,
-            text: JSON.stringify(ev.args),
-          });
-          break;
-        }
-        case "steer": {
-          // Folded into the running turn: show it in the transcript so it is
-          // clear the model was steered mid-flight, and start a fresh
-          // assistant bubble for whatever it says next.
-          assistantBuf = null;
-          this.entries.push({ role: "user", text: `(mid-turn) ${ev.text}` });
-          break;
-        }
-        case "tool_result": {
-          const last = this.entries[this.entries.length - 1];
-          if (last && last.role === "tool" && last.name === ev.name) {
-            last.ok = ev.ok;
-            last.text = ev.output;
-          }
-          break;
-        }
-        case "done":
-        case "error": {
-          assistantBuf = null;
-          break;
-        }
-      }
+      assistantBuf = applyEvent(this.entries, ev, assistantBuf);
       onUpdate();
     };
 
