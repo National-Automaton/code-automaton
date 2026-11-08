@@ -141,4 +141,132 @@ const gate = (a: any, name: string, args: any, emit: any = () => {}) =>
   );
 }
 
+// --- every tool result is committed before the turn ends ------------------
+//
+// Regression: the loop that commits results used to `return` from *inside* the
+// for-loop when a `new_session` approval appeared. With the approval first in a
+// batch, the later tool results were never written, so the turn's `assistant`
+// message was left carrying tool calls with no `tool` reply -- a history shape
+// providers reject outright. The session then ended on a dangling `tool` entry
+// and appeared to go idle.
+//
+// These drive a real `Agent.send` against a stubbed `fetch`, so the assertions
+// cover the commit loop itself rather than a copy of it.
+
+/** One SSE frame carrying a complete tool call. */
+const toolFrame = (index: number, id: string, name: string, args: any) =>
+  `data: ${JSON.stringify({
+    choices: [
+      {
+        delta: {
+          tool_calls: [
+            { index, id, type: "function", function: { name, arguments: JSON.stringify(args) } },
+          ],
+        },
+      },
+    ],
+  })}\n\n`;
+const stopFrame = `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`;
+
+/** A one-shot 200 SSE response over the given frames. */
+function framesResponse(frames: string[]): Response {
+  const encoder = new TextEncoder();
+  let i = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (i < frames.length) controller.enqueue(encoder.encode(frames[i++]));
+      else controller.close();
+    },
+  });
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
+/** Stub `globalThis.fetch`, serving each response in turn. */
+function stubFetch(responses: (() => Response)[]): { calls: number } {
+  const state = { calls: 0 };
+  (globalThis as any).fetch = async () => {
+    const make = responses[Math.min(state.calls, responses.length - 1)];
+    state.calls++;
+    return make();
+  };
+  return state;
+}
+
+const realFetch = globalThis.fetch;
+
+try {
+  // `new_session` first, then two ordinary tools in the same batch.
+  //
+  // The batch runs serially (new_session is a writer), so the approval is seen
+  // before the later results are pushed -- the case that used to truncate.
+  {
+    stubFetch([
+      () =>
+        framesResponse([
+          toolFrame(0, "call_a", "new_session", { title: "next" }),
+          toolFrame(1, "call_b", "read_file", { path: "/etc/hostname" }),
+          toolFrame(2, "call_c", "list_dir", { path: "/tmp" }),
+          stopFrame,
+        ]),
+      () => framesResponse([stopFrame]),
+    ]);
+
+    const a: any = new Agent(config);
+    a.setConfirm(async () => "yes");
+    const out = await a.send("start a session", () => {});
+
+    assert.deepEqual(out.newSession, { title: "next", preamble: undefined });
+
+    // The assistant turn that asked for three tools, and the three replies.
+    const assistant = [...a.messages].reverse().find((m: any) => m.tool_calls?.length);
+    assert.ok(assistant, "the turn should have recorded a tool-calling assistant message");
+    const askedIds = assistant.tool_calls.map((c: any) => c.id);
+    assert.deepEqual(askedIds, ["call_a", "call_b", "call_c"]);
+
+    const repliedIds = a.messages
+      .filter((m: any) => m.role === "tool")
+      .map((m: any) => m.tool_call_id);
+    assert.deepEqual(
+      repliedIds,
+      askedIds,
+      `every tool call must have a matching result; got ${JSON.stringify(repliedIds)}`
+    );
+
+    // Ending on a `tool` message is expected here: the turn returns instead of
+    // asking the model for another reply. What must never happen is an
+    // assistant tool call with no matching `tool` result, asserted above.
+  }
+
+  // A second approval in one batch still opens exactly one session.
+  {
+    stubFetch([
+      () =>
+        framesResponse([
+          toolFrame(0, "call_a", "new_session", { title: "dup" }),
+          toolFrame(1, "call_b", "new_session", { title: "dup" }),
+          stopFrame,
+        ]),
+      () => framesResponse([stopFrame]),
+    ]);
+
+    const a: any = new Agent(config);
+    let asked = 0;
+    a.setConfirm(async () => {
+      asked++;
+      return "yes";
+    });
+    const out = await a.send("open", () => {});
+    assert.deepEqual(out.newSession, { title: "dup", preamble: undefined });
+    assert.equal(asked, 2, "each call is confirmed");
+    const replies = a.messages.filter((m: any) => m.role === "tool");
+    assert.equal(replies.length, 2, "both results are committed");
+  }
+} finally {
+  (globalThis as any).fetch = realFetch;
+}
+
 console.log("new-session: ok");
+

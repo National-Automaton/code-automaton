@@ -1025,15 +1025,28 @@ export class Agent {
             this.toolPeak = Math.max(this.toolPeak, running);
           }
         );
+        // Every result is committed before anything else happens. A turn that
+        // asked for four tools and got four results back must leave four `tool`
+        // messages in the history: an `assistant` turn with unanswered tool
+        // calls is rejected by every provider, which strands the session.
+        //
+        // The user approved a new session. Nothing more will ever be done in
+        // *this* one -- the app is about to switch away from it -- so the turn
+        // ends here and the request is returned to the caller. Continuing to
+        // ask the model for more tool calls would spend tokens on a
+        // conversation nobody is looking at.
+        //
+        // Note the return happens *after* the loop, not inside it. Returning
+        // from the middle left the remaining results unwritten, so the turn
+        // ended on a dangling `tool` message -- the exact shape that breaks
+        // the following request. Only the first approval is honoured; a model
+        // that asks twice still opens one session.
+        let openedNewSession: { title?: string; preamble?: string } | undefined;
         for (const { id, output, newSession } of results) {
           this.messages.push({ role: "tool", tool_call_id: id, content: output });
-          // The user approved a new session. Nothing more will ever be done in
-          // *this* one -- the app is about to switch away from it -- so the turn
-          // ends here and the request is returned to the caller. Continuing to
-          // ask the model for more tool calls would spend tokens on a
-          // conversation nobody is looking at.
-          if (newSession) return { newSession };
+          if (newSession && !openedNewSession) openedNewSession = newSession;
         }
+        if (openedNewSession) return { newSession: openedNewSession };
         return {};
       }
     } finally {
