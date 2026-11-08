@@ -182,7 +182,13 @@ export interface RenderState {
    * never reaches a scrollback buffer or a screenshot. The length is the only
    * thing revealed, which is unavoidable if the caret is to go anywhere.
    */
-  password?: { label: string; length: number; cursor: number } | null;
+  password?: {
+    label: string;
+    length: number;
+    cursor: number;
+    /** True (default) to mask the value; false to echo it, for a username. */
+    hidden?: boolean;
+  } | null;
   /**
    * Set while a `use_secret` call is waiting for the user's approval.
    *
@@ -731,7 +737,7 @@ export class Screen {
     // A password field draws one bullet per character instead of the text, so
     // the credential never reaches the terminal. The caret arithmetic below is
     // unchanged: it works on the same length, only the glyphs differ.
-    const fieldText = s.password
+    const fieldText = s.password?.hidden !== false && s.password
       ? "•".repeat(s.password.length)
       : s.rename
         ? s.rename.value
@@ -787,7 +793,10 @@ export class Screen {
     // The password prompt hides what is typed, so the hint has to say what the
     // keys do -- otherwise Enter and Esc are indistinguishable and there is no
     // way to tell whether the value is being accepted.
-    const passwordHint = "secret · Enter save · Esc cancel · input hidden";
+    const passwordHint =
+      s.password?.hidden === false
+        ? "secret · Enter save · Esc cancel"
+        : "secret · Enter save · Esc cancel · input hidden";
     // The hint is clamped to what the status line has left. Measured in
     // *visible* columns: `statusTag` and `toolTag` carry escape codes, so their
     // raw lengths overstate the space they take and the slice came out too

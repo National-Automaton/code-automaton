@@ -393,6 +393,28 @@ crypto. Treat the file permissions as the boundary.
 Names are lowercase letters, digits, `.`, `_` and `-` (max 64), because the name
 becomes a filename. `--force` replaces an existing secret.
 
+#### Asking for a credential: `request_secret`
+
+The agent can ask you for a credential it needs mid-task. You get a prompt; the
+value goes straight into the vault and is never returned to the model:
+
+```
+WordPress username for runningafever.com:      ← echoed, it is not secret
+Application password for runningafever.com:    ← typed hidden
+```
+
+- A non-secret such as a username is shown while typing (`hidden: false`); a
+  password is masked by default.
+- **Never return the value to the model.** `request_secret` returns only which
+  names were saved, so the model can retry its `use_secret` call.
+- **Never overwrite.** A name already in the vault is left alone and reported as
+  such; change it deliberately with `/secret add <name> --force`.
+- A cancelled prompt is reported as cancelled, and the model is told not to ask
+  again in that turn.
+
+Ask for credentials through this, not in ordinary chat. A password typed as a
+chat message is in the transcript before anything can scrub it.
+
 #### Spending a credential: `use_secret`
 
 The agent can *use* a credential without seeing it. It writes the command with

@@ -203,7 +203,8 @@ export class Session {
     input: string,
     onUpdate: () => void,
     images: AttachedImage[] = [],
-    confirm?: (summary: string, secrets: string[]) => Promise<"yes" | "no" | "always">
+    confirm?: (summary: string, secrets: string[]) => Promise<"yes" | "no" | "always">,
+    askSecret?: (name: string, label: string, hidden: boolean) => Promise<string | null>
   ): Promise<void> {
     this.status = "thinking";
     // The approval prompt belongs to the UI, not to the agent: `Agent` has no
@@ -211,6 +212,8 @@ export class Session {
     // while a programmatic run (tests, tooling) simply cannot approve anything
     // and `use_secret` refuses.
     this.agent.setConfirm(confirm ?? null);
+    // Same reasoning: collecting a credential the task needs is a UI job.
+    this.agent.setAskSecret(askSecret ?? null);
     // Show the attachment in the transcript so it is clear what was sent; the
     // pixels themselves never go in the entry list.
     const label = images.length

@@ -105,6 +105,50 @@ export const toolDefinitions: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "request_secret",
+      description:
+        "Ask the user for a credential and store it in the credentials vault. " +
+        "Use this when a task needs a credential that is not stored yet: the user " +
+        "is shown a prompt and types the value hidden, so it never reaches you. " +
+        "Returns only whether it was saved. Do not ask for passwords in ordinary " +
+        "chat -- a value typed into the conversation is in the transcript and " +
+        "cannot be scrubbed. Supports several secrets in one call.",
+      parameters: {
+        type: "object",
+        properties: {
+          secrets: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                name: {
+                  type: "string",
+                  description:
+                    "Vault name to store under: lowercase letters, digits, . _ -",
+                },
+                label: {
+                  type: "string",
+                  description:
+                    "What to ask for, e.g. 'WordPress username for runningafever.com'.",
+                },
+                hidden: {
+                  type: "boolean",
+                  description:
+                    "True (default) to mask the input. Set false for a non-secret " +
+                    "like a username, so the user can see what they typed.",
+                },
+              },
+              required: ["name", "label"],
+            },
+          },
+        },
+        required: ["secrets"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "use_secret",
       description:
         "Run a command with credentials from the credentials vault, without the " +

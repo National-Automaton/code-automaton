@@ -6,7 +6,7 @@ import type {
 import { Config } from "./config.js";
 import { parallelBatch, runTool, secretNamesIn, toolDefinitions } from "./tools.js";
 import type { ToolResult } from "./tools.js";
-import { redact } from "./secrets.js";
+import { hasSecret, isValidName, normaliseName, redact, setSecret, trackSecret } from "./secrets.js";
 import {
   AttachedImage,
   attachImage,
@@ -451,6 +451,11 @@ export class Agent {
     args: any,
     emit: (ev: AgentEvent) => void
   ): Promise<ToolResult> {
+    // `request_secret` asks the user for a credential the task needs. It is
+    // gated too, but for a different reason than `use_secret`: not "may this be
+    // spent" but "do not let this silently overwrite something already stored".
+    if (name === "request_secret") return this.requestSecrets(args);
+
     if (name !== "use_secret") return runTool(name, args);
 
     const argv: string[] = Array.isArray(args?.command) ? args.command.map(String) : [];
@@ -515,6 +520,109 @@ export class Agent {
   /** Forget every approval. For tests. */
   clearApprovals(): void {
     this.approvedSecrets.clear();
+  }
+
+  /**
+   * Collect credentials the task needs but the vault does not have.
+   *
+   * The values are typed by the user at a hidden prompt and go straight to
+   * `setSecret`; they are never returned to the model, never put in a tool
+   * result, and never in the transcript. What comes back is only which names
+   * were saved, which is what the model needs to retry its `use_secret` call.
+   *
+   * Refuses to overwrite an existing secret: a model that asks again (or a
+   * re-run of the same task) must not silently replace a working credential.
+   * The user can still change one deliberately with /secret add --force.
+   */
+  private async requestSecrets(args: any): Promise<ToolResult> {
+    const items: Array<{ name: string; label: string; hidden: boolean }> = Array.isArray(
+      args?.secrets
+    )
+      ? args.secrets
+          .filter((x: any) => x && typeof x.name === "string")
+          .map((x: any) => ({
+            name: String(x.name),
+            label: String(x.label ?? x.name),
+            hidden: x.hidden !== false,
+          }))
+      : [];
+
+    if (!items.length) {
+      return { ok: false, output: "request_secret: `secrets` must be a non-empty array" };
+    }
+    const invalid = items.filter((i) => !isValidName(normaliseName(i.name)));
+    if (invalid.length) {
+      return {
+        ok: false,
+        output:
+          `request_secret: invalid name(s): ${invalid.map((i) => i.name).join(", ")}. ` +
+          `Use lowercase letters, digits, . _ -`,
+      };
+    }
+    if (!this.askSecret) {
+      return {
+        ok: false,
+        output:
+          "request_secret: this session cannot prompt the user, so the credential " +
+          "could not be collected. Ask them to run /secret add <name>.",
+      };
+    }
+
+    const saved: string[] = [];
+    const kept: string[] = [];
+    const cancelled: string[] = [];
+
+    for (const item of items) {
+      const n = normaliseName(item.name);
+      if (hasSecret(n)) {
+        kept.push(n);
+        continue;
+      }
+      const value = await this.askSecret(n, item.label, item.hidden);
+      if (value === null) {
+        cancelled.push(n);
+        continue;
+      }
+      // Tracked before storage so the value is masked even if the write fails.
+      trackSecret(value);
+      if (setSecret(n, value)) saved.push(n);
+    }
+
+    const parts: string[] = [];
+    if (saved.length) parts.push(`saved: ${saved.join(", ")}`);
+    if (kept.length) parts.push(`already stored (left unchanged): ${kept.join(", ")}`);
+    if (cancelled.length) parts.push(`cancelled by the user: ${cancelled.join(", ")}`);
+
+    const ok = cancelled.length === 0;
+    return {
+      ok,
+      output:
+        `request_secret: ${parts.join("; ")}. ` +
+        (ok
+          ? "The value(s) went straight into the vault and were not shown to you. " +
+            "Retry with identical placeholder names."
+          : parts.join("") === ""
+            ? ""
+            : "Do not ask again for a cancelled credential; ask the user what they would like instead."),
+    };
+  }
+
+  /**
+   * Ask the user to type a credential, injected by the UI.
+   *
+   * Resolves to the value, or null if the user cancelled. The value is used
+   * immediately and never stored on the agent, so it cannot leak through agent
+   * state.
+   */
+  private askSecret:
+    | ((name: string, label: string, hidden: boolean) => Promise<string | null>)
+    | null = null;
+
+  /** Install the secret-collection prompt. */
+  setAskSecret(
+    fn: ((name: string, label: string, hidden: boolean) => Promise<string | null>) | null
+  ): void {
+    this.askSecret = fn;
   }
 
   private needsVision(): boolean {

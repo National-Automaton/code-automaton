@@ -104,7 +104,17 @@ export class App {
    */
   private secretPrompt: {
     name: string;
+    /** What the user is being asked for; shown above the field. */
+    label: string;
+    /** False for a non-secret such as a username, so it is echoed visibly. */
+    hidden: boolean;
     buffer: LineBuffer;
+    /**
+     * Resolves the caller waiting on this value, or null when the prompt was
+     * opened by `/secret add` (where there is nobody to hand the result back
+     * to beyond storing it).
+     */
+    resolve: ((value: string | null) => void) | null;
   } | null = null;
   /**
    * A pending `use_secret` approval, when the agent is waiting on the user.
@@ -321,9 +331,12 @@ export class App {
       approval: this.approval ? { summary: this.approval.summary } : null,
       password: this.secretPrompt
         ? {
-            label: `secret "${this.secretPrompt.name}" — value hidden:`,
+            label: this.secretPrompt.label,
+            // A non-hidden prompt shows the value, so the caret and the text
+            // are drawn normally; only the masked one hides it.
             length: this.secretPrompt.buffer.value.length,
             cursor: this.secretPrompt.buffer.cursor,
+            hidden: this.secretPrompt.hidden,
           }
         : null,
     });
@@ -623,6 +636,16 @@ export class App {
         this.secretPrompt = null;
         if (value === "") {
           this.systemNote(`secret ${p.name}: cancelled (nothing entered)`);
+          p.resolve?.(null);
+          this.requestRender();
+          return;
+        }
+        if (p.resolve) {
+          // Opened by the agent (`request_secret`): hand the value back and
+          // store nothing here. The agent tracks and stores it so the ordering
+          // (track, then write) is in one place.
+          this.systemNote(`secret ${p.name}: entered`);
+          p.resolve(value);
           this.requestRender();
           return;
         }
@@ -641,6 +664,7 @@ export class App {
       case "escape":
         this.secretPrompt = null;
         this.systemNote(`secret ${p.name}: cancelled`);
+        p.resolve?.(null);
         this.requestRender();
         return;
       case "backspace":
@@ -701,8 +725,38 @@ export class App {
       this.requestRender();
       return;
     }
-    this.secretPrompt = { name: n, buffer: new LineBuffer() };
+    this.secretPrompt = {
+      name: n,
+      label: `secret "${n}" — value hidden:`,
+      hidden: true,
+      buffer: new LineBuffer(),
+      resolve: null,
+    };
     this.requestRender();
+  }
+
+  /**
+   * The prompt handed to the agent for `request_secret`.
+   *
+   * One secret per call, in sequence: collecting several at once would mean
+   * juggling which field is active, and the agent can call the tool repeatedly.
+   * Resolves to the typed value, or null if cancelled.
+   */
+  private askSecretInput(
+    name: string,
+    label: string,
+    hidden: boolean
+  ): Promise<string | null> {
+    return new Promise((resolve) => {
+      this.secretPrompt = {
+        name,
+        label: `${label}:`,
+        hidden,
+        buffer: new LineBuffer(),
+        resolve,
+      };
+      this.requestRender();
+    });
   }
 
   /** `/secret` — list, add, remove. Values are never printed. */
@@ -1064,7 +1118,8 @@ export class App {
         text,
         () => this.requestRender(),
         images,
-        (summary, secrets) => this.askApproval(summary, secrets)
+        (summary, secrets) => this.askApproval(summary, secrets),
+        (name, label, hidden) => this.askSecretInput(name, label, hidden)
       );
     }
   }
@@ -1653,7 +1708,8 @@ export class App {
         text,
         () => this.requestRender(),
         images,
-        (summary, secrets) => this.askApproval(summary, secrets)
+        (summary, secrets) => this.askApproval(summary, secrets),
+        (name, label, hidden) => this.askSecretInput(name, label, hidden)
       );
     }
     this.requestRender();
