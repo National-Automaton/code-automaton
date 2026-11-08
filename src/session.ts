@@ -61,6 +61,21 @@ import {
 } from "./store.js";
 
 /**
+ * Marker `seedHandover` puts at the head of a handover message.
+ *
+ * Labelled rather than left bare: the text is a previous agent's notes, and
+ * presenting it as the user's own words would misrepresent an instruction the
+ * user never gave. It doubles as the way a seeded session is recognised --
+ * see `Session.seeded`.
+ */
+const HANDOVER_MARKER = "[handover from the previous session]";
+
+/** True when a message body is a seeded handover rather than real user text. */
+function isHandoverText(content: ChatCompletionMessageParam["content"]): boolean {
+  return typeof content === "string" && content.startsWith(HANDOVER_MARKER);
+}
+
+/**
  * A live session: one Agent, its transcript entries, and its current status.
  * Output is buffered here so switching away from a busy session and back
  * again shows everything that accumulated.
@@ -128,15 +143,25 @@ export class Session {
    */
   persisted: boolean;
   /**
-   * True once a handover has been seeded into the history.
+   * True when a handover has been seeded into the history.
    *
    * A seeded session has no entries -- the handover is history, not transcript,
-   * so it is never drawn -- and that makes it look untouched to `persist`,
-   * which would skip the write and lose the handover on reload. Like a title,
-   * this is a deliberate act that has to outlive the terminal it happened in,
-   * so it forces the record out.
+   * so it is never drawn -- and that makes it look untouched: `persist` would
+   * skip the write and lose the handover on reload, and `submitPrompt` would
+   * read it as an empty placeholder and open a *second* session for the user's
+   * first message, dropping the handover. Both have to tell the two apart.
+   *
+   * Derived from the history rather than recorded as a flag, because a flag has
+   * to be written to disk and restored to survive a restart, and every path
+   * that builds a session from a record would have to remember to restore it.
+   * Deriving it from the message `seedHandover` writes means a reloaded session
+   * is seeded for the same reason a fresh one is, and the two can never drift.
    */
-  seeded = false;
+  get seeded(): boolean {
+    return this.agent.messages.some(
+      (m) => m.role === "user" && isHandoverText(m.content)
+    );
+  }
 
   constructor(
     private config: Config,
@@ -222,8 +247,9 @@ export class Session {
    * also means it is read exactly once, at creation, and from then on is just
    * part of the conversation: it is never re-read from disk or rebuilt.
    *
-   * The transcript gets a matching entry so the handover is visible when
-   * scrolling back, and the stored messages keep it for a reload.
+   * The transcript gets no matching entry: the handover is context the session
+   * needs, not something the user asked to see. The stored messages keep it, so
+   * it survives a reload without ever being drawn.
    *
    * Labelled as a handover, not left bare: it is text a previous agent wrote,
    * and presenting it as the user's own words would misrepresent an instruction
@@ -243,7 +269,7 @@ export class Session {
   async seedHandover(preamble: string): Promise<void> {
     const text = preamble.trim();
     if (!text) return;
-    const body = `[handover from the previous session]\n\n${text}`;
+    const body = `${HANDOVER_MARKER}\n\n${text}`;
     // Deliberately NOT added to `entries`: the transcript is what is drawn on
     // screen, and the handover is context the new session needs, not something
     // the user asked to see. Printing it put a wall of the previous session's
@@ -256,7 +282,6 @@ export class Session {
     // session into a turn and spend a request before the user has asked for
     // anything. `Agent` exposes the history it will send.
     this.agent.messages.push({ role: "user", content: body });
-    this.seeded = true;
     this.updatedAt = Date.now();
     // Written out now, not on the first turn. The handover is injected exactly
     // once, from this call, so if it were only persisted when a message was

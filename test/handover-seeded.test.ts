@@ -153,4 +153,82 @@ const config = {
   await s.delete();
 }
 
+// --- a prompt in a seeded session runs there, not in a new session --------
+//
+// The handover lives in `messages`, never `entries`, so a seeded session has no
+// entries -- the same shape as an untouched placeholder. `submitPrompt` used to
+// treat any session with no entries as a placeholder and route the prompt to
+// `startNewSessionWith`, which opens a second session and makes the prompt its
+// first message. The handover was silently dropped and the user was moved.
+//
+// This pins the predicate that routing rests on: `entries.length === 0 &&
+// !seeded`. A seeded session must be distinguishable from a bare placeholder by
+// the property `submitPrompt` actually tests.
+{
+  const seeded = new Session(config);
+  await seeded.seedHandover("context the next message must not lose");
+
+  assert.equal(
+    seeded.entries.length,
+    0,
+    "a seeded session still has no entries, so entries alone cannot decide"
+  );
+  assert.equal(seeded.seeded, true, "seeded marks it as not-a-placeholder");
+
+  const placeholder = new Session(config);
+  assert.equal(placeholder.entries.length, 0);
+  assert.equal(
+    placeholder.seeded,
+    false,
+    "a truly new session is not seeded, so it still routes to a new session"
+  );
+
+  // Ordinary typing must not make a session look seeded.
+  await placeholder.seedHandover("   ");
+  assert.equal(
+    placeholder.seeded,
+    false,
+    "a blank handover seeds nothing and must not mark the session"
+  );
+
+  await seeded.delete();
+  await placeholder.delete();
+}
+
+// --- the marker survives a restart ---------------------------------------
+//
+// This is the case that actually bit: the session is created, the handover is
+// seeded, coda is restarted before the user types anything, and the session is
+// rebuilt from its record. If `seeded` were an in-memory flag set only by
+// `seedHandover`, the reloaded session would come back with `seeded === false`
+// and no entries -- indistinguishable from a placeholder -- so the user's first
+// prompt would open a second session and lose the handover again.
+{
+  const s = new Session(config);
+  await s.seedHandover("do not merge PR #58");
+  await s.release();
+
+  const rec = (await loadAll()).find((r) => r.id === s.id);
+  assert.ok(rec, "the seeded session reached disk");
+
+  const reopened = new Session(config, rec!);
+  assert.equal(
+    reopened.entries.length,
+    0,
+    "the handover is still not drawn after a reload"
+  );
+  assert.equal(
+    reopened.seeded,
+    true,
+    "a reloaded seeded session is still seeded, so its first prompt runs here"
+  );
+  assert.equal(
+    reopened.entries.length === 0 && !reopened.seeded,
+    false,
+    "a reloaded seeded session must not route its first prompt to a new session"
+  );
+
+  await reopened.delete();
+}
+
 console.log("handover-seeded: ok");
