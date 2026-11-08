@@ -1,5 +1,6 @@
 import { Agent, AgentEvent } from "./agent.js";
 import type { AttachedImage } from "./image.js";
+import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { Config } from "./config.js";
 import { SessionLock, acquireLock, describeHolder } from "./lock.js";
 import { redact } from "./secrets.js";
@@ -218,6 +219,17 @@ export class Session {
    * and presenting it as the user's own words would misrepresent an instruction
    * the user never gave.
    */
+  /**
+   * The history this session will send, for callers that need to inspect it
+   * (tests, and anything checking what a session actually holds).
+   *
+   * Read-only: mutating it from outside would bypass `persist`, so the array is
+   * copied. `seedHandover` is the one supported way to add to it.
+   */
+  get history(): ChatCompletionMessageParam[] {
+    return [...this.agent.messages];
+  }
+
   async seedHandover(preamble: string): Promise<void> {
     const text = preamble.trim();
     if (!text) return;

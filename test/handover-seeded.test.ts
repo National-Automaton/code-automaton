@@ -52,16 +52,16 @@ const config = {
 
 {
   const s = new Session(config);
-  const before = s.agent.messages.length;
+  const before = s.history.length;
 
   await s.seedHandover("PR #58 is open. Do not merge it.");
 
   assert.equal(
-    s.agent.messages.length,
+    s.history.length,
     before + 1,
     "exactly one message is added"
   );
-  const msg: any = s.agent.messages[s.agent.messages.length - 1];
+  const msg: any = s.history[s.history.length - 1];
   assert.equal(msg.role, "user", "the handover rides as a user message");
   assert.ok(
     msg.content.includes("PR #58 is open. Do not merge it."),
@@ -84,9 +84,9 @@ const config = {
 
 {
   const s = new Session(config);
-  const before = s.agent.messages.length;
+  const before = s.history.length;
   await s.seedHandover("   \n  ");
-  assert.equal(s.agent.messages.length, before, "a blank handover is ignored");
+  assert.equal(s.history.length, before, "a blank handover is ignored");
   assert.equal(s.entries.length, 0);
   await s.release();
 }
@@ -134,7 +134,7 @@ const config = {
   // Reopening yields the same context, without re-seeding it.
   const reopened = new Session(config, rec!);
   assert.ok(
-    reopened.agent.messages.some(
+    reopened.history.some(
       (m: any) => m.role === "user" && String(m.content).includes("do not merge PR #58")
     ),
     "a reopened session still holds the handover"
