@@ -1767,7 +1767,13 @@ export class App {
     const images = this.pendingImages;
     this.pendingImages = [];
 
-    if (session.entries.length === 0) {
+    // A session holding a seeded handover has no entries either -- the handover
+    // is history, not transcript, so it is never drawn -- but it is not an
+    // untouched placeholder. Sending it to `startNewSessionWith` would open a
+    // second session and hand it the user's prompt as its first message,
+    // silently dropping the handover along the way. `seeded` distinguishes the
+    // two; the prompt belongs in this session, so run it here.
+    if (session.entries.length === 0 && !session.seeded) {
       // startNewSessionWith runs the turn; hand it the attachments so the
       // image rides along with the first message rather than being lost --
       // and so the turn is started once, not once here and once below.
