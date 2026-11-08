@@ -127,6 +127,16 @@ export class Session {
    * persisted, so only genuinely new ones are exempt.
    */
   persisted: boolean;
+  /**
+   * True once a handover has been seeded into the history.
+   *
+   * A seeded session has no entries -- the handover is history, not transcript,
+   * so it is never drawn -- and that makes it look untouched to `persist`,
+   * which would skip the write and lose the handover on reload. Like a title,
+   * this is a deliberate act that has to outlive the terminal it happened in,
+   * so it forces the record out.
+   */
+  seeded = false;
 
   constructor(
     private config: Config,
@@ -234,11 +244,19 @@ export class Session {
     const text = preamble.trim();
     if (!text) return;
     const body = `[handover from the previous session]\n\n${text}`;
-    this.entries.push({ role: "user", text: body });
+    // Deliberately NOT added to `entries`: the transcript is what is drawn on
+    // screen, and the handover is context the new session needs, not something
+    // the user asked to see. Printing it put a wall of the previous session's
+    // notes in front of them every time a session was opened. The message alone
+    // is what reaches the model; `toRecord` saves `messages` and `entries`
+    // independently, so the handover still survives a reload without being
+    // drawn.
+    //
     // Stored directly rather than sent through `run`, which would put the
     // session into a turn and spend a request before the user has asked for
     // anything. `Agent` exposes the history it will send.
     this.agent.messages.push({ role: "user", content: body });
+    this.seeded = true;
     this.updatedAt = Date.now();
     // Written out now, not on the first turn. The handover is injected exactly
     // once, from this call, so if it were only persisted when a message was
@@ -358,7 +376,13 @@ export class Session {
     // the name back to the default re-arms auto-titling (`rename`), and if the
     // guard stopped here the file on disk would still hold the old name while
     // this copy said otherwise.
-    if (this.entries.length === 0 && this.title === DEFAULT_TITLE && !this.persisted) return;
+    if (
+      this.entries.length === 0 &&
+      this.title === DEFAULT_TITLE &&
+      !this.persisted &&
+      !this.seeded
+    )
+      return;
     await save(this.toRecord());
     this.persisted = true;
   }

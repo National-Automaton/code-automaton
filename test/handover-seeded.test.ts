@@ -72,9 +72,13 @@ const config = {
     `the handover must be labelled as such: ${JSON.stringify(msg.content.slice(0, 60))}`
   );
 
-  assert.equal(s.entries.length, 1, "the transcript shows it too");
-  assert.equal(s.entries[0].role, "user");
-  assert.ok(s.entries[0].text.includes("PR #58 is open"));
+  // The transcript is what gets drawn, so the handover must NOT be in it: it is
+  // context the session needs, not something the user asked to see.
+  assert.deepEqual(
+    s.entries,
+    [],
+    `the handover must not be drawn in the transcript, got ${JSON.stringify(s.entries)}`
+  );
 
   assert.equal(s.status, "idle", "seeding must not start a turn");
   await s.release();
@@ -91,17 +95,22 @@ const config = {
   await s.release();
 }
 
-// --- a seeded session is not an empty placeholder ------------------------
+// --- a seeded session still persists, despite having no entries ----------
+//
+// A seeded session looks untouched: no entries, default title. `persist` used
+// to skip that, which silently dropped the handover on reload. Removing the
+// transcript entry must not bring that back.
 
 {
+  const { loadAll } = await import("../src/store.js");
   const s = new Session(config);
-  await s.seedHandover("context");
-  assert.notEqual(
-    s.entries.length,
-    0,
-    "a seeded session has entries, so pruneEmptySessions leaves it alone"
+  await s.seedHandover("context that must survive");
+  const rec = (await loadAll()).find((r) => r.id === s.id);
+  assert.ok(
+    rec,
+    "the seeded session was written even though it has no entries"
   );
-  await s.release();
+  await s.delete();
 }
 
 // --- the handover survives a reload --------------------------------------
@@ -119,9 +128,10 @@ const config = {
   const all = await loadAll();
   const rec = all.find((r) => r.id === s.id);
   assert.ok(rec, "the seeded session was written to disk");
-  assert.ok(
-    rec!.entries.some((e: any) => e.text.includes("do not merge PR #58")),
-    "the transcript entry survives"
+  assert.equal(
+    rec!.entries.length,
+    0,
+    "the handover is not written into the transcript"
   );
   const stored: any[] = rec!.messages;
   assert.ok(
