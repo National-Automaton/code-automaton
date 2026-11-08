@@ -205,7 +205,7 @@ export class Session {
     images: AttachedImage[] = [],
     confirm?: (summary: string, secrets: string[]) => Promise<"yes" | "no" | "always">,
     askSecret?: (name: string, label: string, hidden: boolean) => Promise<string | null>
-  ): Promise<void> {
+  ): Promise<{ newSession?: { title?: string; preamble?: string } }> {
     this.status = "thinking";
     // The approval prompt belongs to the UI, not to the agent: `Agent` has no
     // terminal. Installing it here means a turn started from the app can ask,
@@ -234,8 +234,9 @@ export class Session {
       onUpdate();
     };
 
+    let newSession: { title?: string; preamble?: string } | undefined;
     try {
-      await this.agent.send(input, emit, images);
+      ({ newSession } = await this.agent.send(input, emit, images));
     } catch (err: any) {
       this.entries.push({
         role: "assistant",
@@ -247,6 +248,10 @@ export class Session {
       await this.persist();
       onUpdate();
     }
+    // Returned rather than acted on: a session cannot create a sibling, and
+    // only the app knows about the terminal. Persisted first (in `finally`), so
+    // the turn that asked for the new session is already safe on disk.
+    return { newSession };
   }
 
   /**

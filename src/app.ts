@@ -1154,8 +1154,36 @@ export class App {
         images,
         (summary, secrets) => this.askApproval(summary, secrets),
         (name, label, hidden) => this.askSecretInput(name, label, hidden)
-      );
+      ).then((res) => this.afterTurn(res));
     }
+  }
+
+  /**
+   * React to a finished turn -- currently, the agent asking for a new session.
+   *
+   * This is the one place a `new_session` tool call becomes real. It has to be
+   * the app: sessions are owned here, `Agent` has no terminal, and `runTool`
+   * runs without one. The tool call itself only decided and asked; see
+   * `Agent.openNewSession`.
+   *
+   * Like Ctrl+T, the old session is left alone rather than closed: the reason
+   * the user wanted a new one might not work out, and Ctrl+X is still there if
+   * they want it gone. `startNewSessionWith` would send the handover, so it is
+   * not used -- the handover goes in the input unsent, to be reviewed.
+   */
+  private afterTurn(res: { newSession?: { title?: string; preamble?: string } }): void {
+    this.requestRender();
+    const req = res.newSession;
+    if (!req) return;
+    this.newSession();
+    const fresh = this.current();
+    if (req.title) void fresh.rename(req.title);
+    if (req.preamble) {
+      this.input.clear();
+      this.input.set(req.preamble);
+    }
+    this.scrollToTail();
+    this.requestRender();
   }
 
   /**
@@ -1447,6 +1475,7 @@ export class App {
         "  ←                   Empty input: open session picker",
         "  Ctrl+R              Open the session picker",
         "  Ctrl+T / Ctrl+X     New session / close current session",
+        "                      (the agent can also ask to open one, with a name and handover)",
         "  Alt+R               Rename the current session",
         "  In the picker:  ↑/↓ move · Enter open · Ctrl+X delete · Alt+R rename",
         "  Ctrl+V              Attach a clipboard image (image-only clipboard)",
