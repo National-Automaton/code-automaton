@@ -175,6 +175,29 @@ export interface RenderState {
    */
   rename: { title: string; value: string; cursor: number } | null;
   /**
+   * Set while a secret is being typed (the `/secret` password prompt).
+   *
+   * The value is masked in the field -- one `•` per character, with a caret at
+   * the edit position -- so it is never drawn to the terminal, and therefore
+   * never reaches a scrollback buffer or a screenshot. The length is the only
+   * thing revealed, which is unavoidable if the caret is to go anywhere.
+   */
+  password?: {
+    label: string;
+    length: number;
+    cursor: number;
+    /** True (default) to mask the value; false to echo it, for a username. */
+    hidden?: boolean;
+  } | null;
+  /**
+   * Set while a `use_secret` call is waiting for the user's approval.
+   *
+   * Drawn instead of the input line, above the status line: nothing the user
+   * types here reaches the chat input, so a stray keystroke cannot be sent to
+   * the model while a credential is pending.
+   */
+  approval?: { summary: string } | null;
+  /**
    * When set, the `/model` overlay is shown full-screen -- the same frame the
    * session picker takes over.
    *
@@ -382,8 +405,13 @@ export class Screen {
    * `rows` is the frame budget, which is the terminal height unless a caller
    * asks for less.
    */
-  private viewportRowsFor(input: string, width: number, rows = this.rows): number {
-    const chrome = 4 + this.inputRows(input, width);
+  private viewportRowsFor(
+    input: string,
+    width: number,
+    rows = this.rows,
+    extraChrome = 0
+  ): number {
+    const chrome = 4 + this.inputRows(input, width) + extraChrome;
     return Math.max(1, rows - chrome);
   }
 
@@ -599,7 +627,19 @@ export class Screen {
      * input line and status line were drawn at the wrong rows and then jumped
      * into place on the next frame -- two carets on screen at once.
      */
-    const viewport = this.viewportRowsFor(s.input, width, height);
+    // A password prompt adds a label row above the field, so it is budgeted
+    // here too -- otherwise the frame is one row taller than the transcript
+    // allowance and the status line scrolls away.
+    // An approval prompt replaces the input line and adds its own rows (the
+    // summary plus the key hint). Budgeted here or the frame grows past the
+    // terminal and scrolls, pushing the header into scrollback.
+    const approvalRows = s.approval ? s.approval.summary.split("\n").length + 1 : 0;
+    const viewport = this.viewportRowsFor(
+      s.input,
+      width,
+      height,
+      (s.password ? 1 : 0) + approvalRows
+    );
 
     const all = this.styledEntries(s.entries, width);
     this.lastTotalLines = all.length;
@@ -676,15 +716,44 @@ export class Screen {
     // While a title is being edited (Alt+R) the same line edits the title
     // instead, so the caret accounting below serves both.
     out.push("");
+    // A password prompt names what it is asking for. Without the label the
+    // masked field is indistinguishable from a broken input line.
+    if (s.password) {
+      out.push(DIM + s.password.label.slice(0, Math.max(1, width - 1)) + RESET);
+    }
+    // An approval prompt replaces the input line: there is no text field, so a
+    // stray keystroke cannot be sent to the model while a credential is
+    // pending. The status line below still reports the turn is running.
+    if (s.approval) {
+      const lines = [
+        ...s.approval.summary.split("\n"),
+        "run with this credential?   y = once · a = always this session · n / Esc = no",
+      ];
+      for (const line of lines) {
+        out.push(YELLOW + line.slice(0, Math.max(1, width - 1)) + RESET);
+      }
+    }
     const inputWidth = Math.max(10, width - 3);
-    const fieldText = s.rename ? s.rename.value : s.input;
+    // A password field draws one bullet per character instead of the text, so
+    // the credential never reaches the terminal. The caret arithmetic below is
+    // unchanged: it works on the same length, only the glyphs differ.
+    const fieldText = s.password?.hidden !== false && s.password
+      ? "•".repeat(s.password.length)
+      : s.rename
+        ? s.rename.value
+        : s.input;
     const wrapped = wrapHard(fieldText, inputWidth);
     // Which visual row/col does the cursor land on? When the text exactly fills
     // a row the caret belongs at the end of that filled row, not at column 1 of
     // the next one (which would make it jump a line ahead of the text).
+    const fieldCursor = s.password
+      ? s.password.cursor
+      : s.rename
+        ? s.rename.cursor
+        : s.cursor;
     const clampedCursor = Math.max(
       0,
-      Math.min(s.rename ? s.rename.cursor : s.cursor, fieldText.length)
+      Math.min(fieldCursor, fieldText.length)
     );
     const before = fieldText.slice(0, clampedCursor);
     const atRowEnd = before.length > 0 && before.length % inputWidth === 0;
@@ -721,14 +790,29 @@ export class Screen {
     // prompt) would soft-wrap and shift the row the caret is placed on, so the
     // rename hint is clamped to what is left after the status tag.
     const renameHint = "rename · Enter save · Esc cancel · empty resets to auto-title";
-    // `statusTag` is plain text plus escape codes, ASCII only, so its raw length
-    // is a safe allowance. The 3 covers the gap after it.
-    const hintWidth = Math.max(1, width - 1 - statusTag.length - 3);
+    // The password prompt hides what is typed, so the hint has to say what the
+    // keys do -- otherwise Enter and Esc are indistinguishable and there is no
+    // way to tell whether the value is being accepted.
+    const passwordHint =
+      s.password?.hidden === false
+        ? "secret · Enter save · Esc cancel"
+        : "secret · Enter save · Esc cancel · input hidden";
+    // The hint is clamped to what the status line has left. Measured in
+    // *visible* columns: `statusTag` and `toolTag` carry escape codes, so their
+    // raw lengths overstate the space they take and the slice came out too
+    // long -- a status line one column over the edge soft-wraps and shifts the
+    // frame. The 3 covers the gap before the hint.
+    const used = visibleLength(statusTag) + visibleLength(toolTag) + visibleLength(scrollHint);
+    const hintWidth = Math.max(0, width - 1 - used - 3);
     out.push(
       statusTag +
         toolTag +
         scrollHint +
-        (s.rename ? DIM + "   " + renameHint.slice(0, hintWidth) + RESET : "")
+        (s.password
+          ? DIM + "   " + passwordHint.slice(0, hintWidth) + RESET
+          : s.rename
+            ? DIM + "   " + renameHint.slice(0, hintWidth) + RESET
+            : "")
     );
 
     this.draw(out);
@@ -737,6 +821,12 @@ export class Screen {
     // header(0), blank(1), transcript(2..viewport+1), blank(viewport+2),
     // then the input from viewport+3.
     const inputFirstRow = viewport + 3;
+    // An approval prompt has no text field, so the caret is parked and hidden
+    // rather than left blinking on a line that cannot be typed into.
+    if (s.approval) {
+      stdout.write(ESC + "1;1H" + HIDE_CURSOR);
+      return;
+    }
     this.placeCursor(width, inputFirstRow + (curRow - firstVisibleRow), 2 + curCol);
   }
 

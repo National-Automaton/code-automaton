@@ -342,6 +342,119 @@ Slash commands are typed into the input and sent with Enter.
 | `/image <path>` | Attach an image file (see [Images](#images)) |
 | `/rename <title>` | Rename the current session. With no title, opens the interactive title editor (same as `Alt+R`) |
 | `/model` | Choose this session's text and image model (see [Models](#models)) |
+| `/secret` | Manage the credentials vault (see [Credentials vault](#credentials-vault)) |
+
+### Credentials vault
+
+`coda` needs credentials for things beyond the model API — an app password for
+Gmail, a token for another service. The vault holds them so they can be used
+without ever being shown.
+
+```
+/secret add gmail          # prompts; the value is typed hidden
+/secret list               # names and lengths only
+/secret remove gmail
+/secret exists gmail
+```
+
+The value is entered at a masked prompt:
+
+```
+secret "gmail" — value hidden:
+> ••••••••••••••••••••••
+○ idle · 1 tool   secret · Enter save · Esc cancel · input hidden
+```
+
+**How it protects the value**
+
+- **Typed hidden.** The field draws one `•` per character. The value is never
+  echoed to the terminal, so it cannot reach a scrollback buffer, a screen
+  recording, or a screenshot. Only the length is visible, which is unavoidable
+  if the caret is to point anywhere.
+- **Never printed.** `/secret list` reports names and character counts. There is
+  no "first four characters" hint — that convenience is exactly the leak the
+  vault exists to avoid.
+- **Never in the transcript.** The transcript is plain JSON written to
+  `~/.coda/sessions/` on every turn and re-sent to the model as history, so it
+  is the most likely place for a credential to end up. Tool output, assistant
+  replies, and system notes are all scrubbed: any tracked value is replaced with
+  `[redacted]` on the way in.
+- **Paste is refused** in the prompt. A pasted value also lands in the
+  terminal's paste stream and the clipboard history, which defeats the point.
+- **Separate store.** `~/.config/coda/secrets/` (mode `700`, files `600`) is not
+  the session directory, so a session file can never contain a credential.
+
+**What it does not do.** These are plaintext files with `0600` permissions.
+Anyone who can read your user's files can read the vault. Encrypting it needs a
+key held somewhere the process cannot simply read — Windows DPAPI or the kernel
+keyring — which is a real upgrade and deliberately not faked with home-grown
+crypto. Treat the file permissions as the boundary.
+
+Names are lowercase letters, digits, `.`, `_` and `-` (max 64), because the name
+becomes a filename. `--force` replaces an existing secret.
+
+#### Asking for a credential: `request_secret`
+
+The agent can ask you for a credential it needs mid-task. You get a prompt; the
+value goes straight into the vault and is never returned to the model:
+
+```
+WordPress username for runningafever.com:      ← echoed, it is not secret
+Application password for runningafever.com:    ← typed hidden
+```
+
+- A non-secret such as a username is shown while typing (`hidden: false`); a
+  password is masked by default.
+- **Never return the value to the model.** `request_secret` returns only which
+  names were saved, so the model can retry its `use_secret` call.
+- **Never overwrite.** A name already in the vault is left alone and reported as
+  such; change it deliberately with `/secret add <name> --force`.
+- A cancelled prompt is reported as cancelled, and the model is told not to ask
+  again in that turn.
+
+Ask for credentials through this, not in ordinary chat. A password typed as a
+chat message is in the transcript before anything can scrub it.
+
+#### Spending a credential: `use_secret`
+
+The agent can *use* a credential without seeing it. It writes the command with
+`{{secret:NAME}}` where the value belongs, and the host substitutes it after the
+model has finished writing:
+
+```jsonc
+{ "command": ["curl", "--user", "admin:{{secret:wp-app-password}}",
+              "https://site.test/wp-json/wp/v2/posts"] }
+```
+
+- **No shell.** The command is a program and arguments, run with `spawn` and
+  `shell: false`, so a substituted value cannot be re-parsed as shell syntax.
+- **Never in `argv` when it can be avoided.** `stdin` and `secret` are available
+  for programs that read a password from their input, which keeps the value out
+  of `ps` entirely. A value that reaches the argument list *is* briefly visible
+  in the process table — that is a limitation of programs that only accept
+  credentials as arguments, not something the tool can hide.
+- **Refuses literal secrets.** If the command contains a known value as written,
+  the call fails and the model is told to use a placeholder.
+- **Every use is confirmed.** The prompt names the secret and the command as
+  written — never a value — and nothing runs until you answer:
+
+  ```
+  Use credential wp-app-password to run:
+    curl --user admin {{secret:wp-app-password}} https://site.test/wp-json/…
+  run with this credential?   y = once · a = always this session · n / Esc = no
+  ```
+
+  `y` approves this call, `a` approves that secret for the rest of the session,
+  `n`/`Esc` declines. Anything that is not a yes declines, including Enter —
+  this prompt is the only thing between the agent and a credential.
+- **Approval is per session and per secret.** Approving one credential does not
+  approve another, and a new session starts over.
+- **Output is scrubbed.** A child that echoes its credential still produces a
+  redacted tool result.
+
+`write_file` and `edit_file` also refuse content containing a known secret. That
+closes the easy accident; it does not stop a subprocess redirecting its own
+output to a file, so it is not a sandbox.
 
 ### Models
 

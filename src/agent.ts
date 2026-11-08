@@ -4,8 +4,9 @@ import type {
   ChatCompletionMessageToolCall,
 } from "openai/resources/chat/completions";
 import { Config } from "./config.js";
-import { parallelBatch, runTool, toolDefinitions } from "./tools.js";
+import { parallelBatch, runTool, secretNamesIn, toolDefinitions } from "./tools.js";
 import type { ToolResult } from "./tools.js";
+import { hasSecret, isValidName, normaliseName, redact, setSecret, trackSecret } from "./secrets.js";
 import {
   AttachedImage,
   attachImage,
@@ -419,6 +420,211 @@ export class Agent {
     }
   }
 
+  /**
+   * Secrets the user has approved for this session, keyed by secret name.
+   *
+   * Per session because `coda` runs many at once: approving a credential for an
+   * agent working on one project must not silently approve it for another. The
+   * stored value is the approval, not the credential -- the name is all that is
+   * needed to decide whether to ask again.
+   */
+  private approvedSecrets = new Set<string>();
+
+  /** Names this session may spend without asking again. For the UI. */
+  get approved(): string[] {
+    return [...this.approvedSecrets];
+  }
+
+  /**
+   * Run one tool call, gating `use_secret` behind the user's approval.
+   *
+   * The gate lives here rather than in `runTool` because `runTool` is a plain
+   * function with no way to reach the user. It is deliberately *before* the
+   * command runs and before any substitution: the prompt names the secrets and
+   * the argv as the model wrote them, so nothing sensitive is needed to decide.
+   *
+   * A refusal returns a readable tool result instead of throwing, so the model
+   * can adapt (ask the user, choose another route) rather than failing the turn.
+   */
+  private async runOneTool(
+    name: string,
+    args: any,
+    emit: (ev: AgentEvent) => void
+  ): Promise<ToolResult> {
+    // `request_secret` asks the user for a credential the task needs. It is
+    // gated too, but for a different reason than `use_secret`: not "may this be
+    // spent" but "do not let this silently overwrite something already stored".
+    if (name === "request_secret") return this.requestSecrets(args);
+
+    if (name !== "use_secret") return runTool(name, args);
+
+    const argv: string[] = Array.isArray(args?.command) ? args.command.map(String) : [];
+    const names = [
+      ...new Set([
+        ...argv.flatMap((part) => secretNamesIn(part)),
+        ...(typeof args?.stdin === "string" ? secretNamesIn(args.stdin) : []),
+        ...(typeof args?.secret === "string" ? [args.secret] : []),
+      ]),
+    ];
+
+    // Which of those still need approval, in the order they appear.
+    const pending = names.filter((n) => !this.approvedSecrets.has(n));
+
+    if (pending.length) {
+      const summary =
+        `Use credential${pending.length > 1 ? "s" : ""} ${pending.join(", ")} to run:\n` +
+        `  ${argv.join(" ") || "(no command)"}`;
+
+      if (!this.confirm) {
+        return {
+          ok: false,
+          output:
+            `use_secret: needs approval for ${pending.join(", ")}, but this session ` +
+            `cannot ask the user. Refused.`,
+        };
+      }
+
+      const answer = await this.confirm(summary, pending);
+      if (answer === "no") {
+        return {
+          ok: false,
+          output:
+            `use_secret: the user declined to approve ${pending.join(", ")}. ` +
+            `Do not try again in this turn; ask them what they would like instead.`,
+        };
+      }
+      for (const n of pending) this.approvedSecrets.add(n);
+    }
+
+    const result = await runTool(name, args);
+    return { ...result, output: redact(result.output) };
+  }
+
+  /**
+   * Ask the user before spending a credential.
+   *
+   * Injected by the caller (see `Session.run`) because `Agent` has no terminal.
+   * Resolving `"no"` is a refusal and is never treated as an error.
+   */
+  private confirm:
+    | ((summary: string, secrets: string[]) => Promise<"yes" | "no" | "always">)
+    | null = null;
+
+  /** Install the approval prompt. */
+  setConfirm(
+    fn: ((summary: string, secrets: string[]) => Promise<"yes" | "no" | "always">) | null
+  ): void {
+    this.confirm = fn;
+  }
+
+  /** Forget every approval. For tests. */
+  clearApprovals(): void {
+    this.approvedSecrets.clear();
+  }
+
+  /**
+   * Collect credentials the task needs but the vault does not have.
+   *
+   * The values are typed by the user at a hidden prompt and go straight to
+   * `setSecret`; they are never returned to the model, never put in a tool
+   * result, and never in the transcript. What comes back is only which names
+   * were saved, which is what the model needs to retry its `use_secret` call.
+   *
+   * Refuses to overwrite an existing secret: a model that asks again (or a
+   * re-run of the same task) must not silently replace a working credential.
+   * The user can still change one deliberately with /secret add --force.
+   */
+  private async requestSecrets(args: any): Promise<ToolResult> {
+    const items: Array<{ name: string; label: string; hidden: boolean }> = Array.isArray(
+      args?.secrets
+    )
+      ? args.secrets
+          .filter((x: any) => x && typeof x.name === "string")
+          .map((x: any) => ({
+            name: String(x.name),
+            label: String(x.label ?? x.name),
+            hidden: x.hidden !== false,
+          }))
+      : [];
+
+    if (!items.length) {
+      return { ok: false, output: "request_secret: `secrets` must be a non-empty array" };
+    }
+    const invalid = items.filter((i) => !isValidName(normaliseName(i.name)));
+    if (invalid.length) {
+      return {
+        ok: false,
+        output:
+          `request_secret: invalid name(s): ${invalid.map((i) => i.name).join(", ")}. ` +
+          `Use lowercase letters, digits, . _ -`,
+      };
+    }
+    if (!this.askSecret) {
+      return {
+        ok: false,
+        output:
+          "request_secret: this session cannot prompt the user, so the credential " +
+          "could not be collected. Ask them to run /secret add <name>.",
+      };
+    }
+
+    const saved: string[] = [];
+    const kept: string[] = [];
+    const cancelled: string[] = [];
+
+    for (const item of items) {
+      const n = normaliseName(item.name);
+      if (hasSecret(n)) {
+        kept.push(n);
+        continue;
+      }
+      const value = await this.askSecret(n, item.label, item.hidden);
+      if (value === null) {
+        cancelled.push(n);
+        continue;
+      }
+      // Tracked before storage so the value is masked even if the write fails.
+      trackSecret(value);
+      if (setSecret(n, value)) saved.push(n);
+    }
+
+    const parts: string[] = [];
+    if (saved.length) parts.push(`saved: ${saved.join(", ")}`);
+    if (kept.length) parts.push(`already stored (left unchanged): ${kept.join(", ")}`);
+    if (cancelled.length) parts.push(`cancelled by the user: ${cancelled.join(", ")}`);
+
+    const ok = cancelled.length === 0;
+    return {
+      ok,
+      output:
+        `request_secret: ${parts.join("; ")}. ` +
+        (ok
+          ? "The value(s) went straight into the vault and were not shown to you. " +
+            "Retry with identical placeholder names."
+          : parts.join("") === ""
+            ? ""
+            : "Do not ask again for a cancelled credential; ask the user what they would like instead."),
+    };
+  }
+
+  /**
+   * Ask the user to type a credential, injected by the UI.
+   *
+   * Resolves to the value, or null if the user cancelled. The value is used
+   * immediately and never stored on the agent, so it cannot leak through agent
+   * state.
+   */
+  private askSecret:
+    | ((name: string, label: string, hidden: boolean) => Promise<string | null>)
+    | null = null;
+
+  /** Install the secret-collection prompt. */
+  setAskSecret(
+    fn: ((name: string, label: string, hidden: boolean) => Promise<string | null>) | null
+  ): void {
+    this.askSecret = fn;
+  }
+
   private needsVision(): boolean {
     return this.messages.some((m) => hasImagePart((m as any).content));
   }
@@ -719,7 +925,7 @@ export class Agent {
         const results = await runToolCalls(
           parsed,
           emit,
-          runTool,
+          (name, args) => this.runOneTool(name, args, emit),
           this.config.parallelTools !== false,
           (running) => {
             if (running !== this.runningTools) this.toolSeq++;
