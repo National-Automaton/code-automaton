@@ -343,6 +343,41 @@ Slash commands are typed into the input and sent with Enter.
 | `/rename <title>` | Rename the current session. With no title, opens the interactive title editor (same as `Alt+R`) |
 | `/model` | Choose this session's text and image model (see [Models](#models)) |
 | `/secret` | Manage the credentials vault (see [Credentials vault](#credentials-vault)) |
+| `/instructions` | Show the standing instructions in force (see [Standing instructions](#standing-instructions)) |
+
+### Standing instructions
+
+Rules that should apply to every session — "never merge a pull request", "use
+tabs in this repo" — go in a markdown file and are added to the system prompt.
+
+| File | Applies to |
+| --- | --- |
+| `~/.config/coda/INSTRUCTIONS.md` | every session |
+| `<project>/.coda/INSTRUCTIONS.md` | sessions started in that project |
+
+```markdown
+# Standing instructions
+
+## Git and pull requests
+
+- Never merge, squash, or close a pull request. Always let me merge.
+  Open the PR, confirm CI is green, and stop there.
+- This applies to release PRs too.
+```
+
+- Both files are read when a session starts, so a change takes effect in the
+  **next** session, not the current one.
+- The project file is labelled separately in the prompt, so the model can tell a
+  global rule from a project convention.
+- `/instructions` prints what is actually in force, with the paths — the failure
+  this exists to prevent is a rule that was written but never loaded, and seeing
+  the text is the only way to tell the difference.
+- `coda` never writes these files. They are your rules; a tool that edits its
+  own instructions can quietly change its own limits.
+- Capped at 8,000 characters, because the text is prepended to every request.
+
+A resumed session keeps the system prompt it was saved with: the history is what
+it was, and rewriting the first message would change a past conversation.
 
 ### Credentials vault
 

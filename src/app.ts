@@ -7,6 +7,11 @@ import { lockHolder } from "./lock.js";
 import { loadAll } from "./store.js";
 import type { SessionRecord } from "./store.js";
 import { loadCatalog, bareId } from "./models.js";
+import {
+  globalInstructionsPath,
+  loadInstructions,
+  projectInstructionsPath,
+} from "./instructions.js";
 import type { ModelCatalog } from "./models.js";
 import {
   deleteSecret,
@@ -759,6 +764,35 @@ export class App {
     });
   }
 
+  /**
+   * Report the standing instructions and where they are read from.
+   *
+   * Shows the *text*, not just the paths, because the failure this feature
+   * exists to prevent is a rule that was never loaded -- showing what the model
+   * actually received is the only way to tell "not written" from "not read".
+   */
+  private showInstructions(): void {
+    const global = globalInstructionsPath();
+    const project = projectInstructionsPath(process.cwd());
+    const text = loadInstructions(process.cwd());
+    if (!text) {
+      this.systemNote(
+        "no standing instructions.\n" +
+          `  global:  ${global}\n` +
+          `  project: ${project}\n` +
+          "Create either file with markdown; it is added to the system prompt of " +
+          "every new session."
+      );
+      this.requestRender();
+      return;
+    }
+    this.systemNote(
+      "standing instructions in force:\n\n" +
+        text +
+        `\n\n(global: ${global}\n project: ${project})`
+    );
+  }
+
   /** `/secret` — list, add, remove. Values are never printed. */
   private handleSecretCommand(arg: string): void {
     const [sub, ...rest] = arg.split(/\s+/).filter(Boolean);
@@ -1405,6 +1439,7 @@ export class App {
         "  /rename <title>     Rename the current session (no title: edit it interactively)",
         "  /model              Choose this session's text and image model",
         "  /secret <add|list|remove>  Manage the credentials vault (values entered hidden)",
+        "  /instructions       Show standing instructions and where they are read from",
         "  /prune-images       Delete cached screenshots no session refers to",
         "",
         "Keys:",
@@ -1783,6 +1818,14 @@ export class App {
     if (text === "/model") {
       clrInput();
       void this.openModelPicker();
+      return true;
+    }
+    // `/instructions` shows the standing instructions in force and where they
+    // live. Editing is deliberately not offered: these are the user's rules,
+    // and a tool that rewrites its own instructions can change its own limits.
+    if (text === "/instructions") {
+      clrInput();
+      this.showInstructions();
       return true;
     }
     // `/secret` manages credentials. The value is always entered at a masked

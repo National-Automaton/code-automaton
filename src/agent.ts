@@ -7,6 +7,7 @@ import { Config } from "./config.js";
 import { parallelBatch, runTool, secretNamesIn, toolDefinitions } from "./tools.js";
 import type { ToolResult } from "./tools.js";
 import { hasSecret, isValidName, normaliseName, redact, setSecret, trackSecret } from "./secrets.js";
+import { systemPrompt } from "./instructions.js";
 import {
   AttachedImage,
   attachImage,
@@ -24,7 +25,7 @@ import {
  */
 const MAX_INTERRUPTIONS = 3;
 
-const SYSTEM_PROMPT = `You are a coding assistant running in a terminal.
+export const SYSTEM_PROMPT = `You are a coding assistant running in a terminal.
 You can read, write, and edit files, list directories, and run shell commands.
 Prefer small, focused edits. Explain briefly what you are doing before using tools.
 When you are done, give a short summary of what changed.`;
@@ -344,7 +345,12 @@ export class Agent {
       baseURL: config.visionBaseURL,
       fetch: globalThis.fetch,
     });
-    this.messages = messages ?? [{ role: "system", content: SYSTEM_PROMPT }];
+    // A resumed session already carries its system prompt, so the user's
+    // instructions are not re-applied: the history is what it was, and
+    // rewriting the first message would silently change a past conversation.
+    this.messages = messages ?? [
+      { role: "system", content: systemPrompt(SYSTEM_PROMPT) },
+    ];
   }
 
   /**
