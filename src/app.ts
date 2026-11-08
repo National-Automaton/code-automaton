@@ -1154,7 +1154,8 @@ export class App {
         images,
         (summary, secrets) => this.askApproval(summary, secrets),
         (name, label, hidden) => this.askSecretInput(name, label, hidden)
-      ).then((res) => this.afterTurn(res));
+      ).then((res) => this.afterTurn(res))
+        .catch(() => {});
     }
   }
 
@@ -1171,7 +1172,7 @@ export class App {
    * they want it gone. `startNewSessionWith` would send the handover, so it is
    * not used -- the handover goes in the input unsent, to be reviewed.
    */
-  private afterTurn(res: { newSession?: { title?: string; preamble?: string } }): void {
+  private async afterTurn(res: { newSession?: { title?: string; preamble?: string } }): Promise<void> {
     this.requestRender();
     const req = res.newSession;
     if (!req) return;
@@ -1179,13 +1180,12 @@ export class App {
     const fresh = this.current();
     if (req.title) void fresh.rename(req.title);
     if (req.preamble) {
-      this.input.clear();
-      this.input.set(req.preamble);
-      // The handover is staged unsent, and the session must stay that way until
-      // the user acts on it. Without this the session is an empty placeholder,
-      // and the first prompt typed into it would auto-send the handover as a
-      // brand-new session's opening message.
-      fresh.staged = true;
+      // Seeded into the new session's history rather than left in the input
+      // box. The handover is context the new session needs, and only what is
+      // in the messages is actually available to the model -- staged input
+      // reaches nothing until the user presses Enter. Done once, here: from
+      // then on it is ordinary history and is never rebuilt or re-read.
+      await fresh.seedHandover(req.preamble);
     }
     this.scrollToTail();
     this.requestRender();
@@ -1198,12 +1198,9 @@ export class App {
   private pruneEmptySessions(): void {
     for (let i = this.sessions.length - 1; i >= 0; i--) {
       const s = this.sessions[i];
-      // A staged session is empty too, but its input holds a handover the user
-      // has not reviewed yet. Pruning it would delete the very thing
-      // `new_session` created, and creating the next session would destroy the
-      // previous one before it was ever seen -- so `staged` is excluded here,
-      // exactly as it is in `submitPrompt`.
-      if (s.entries.length === 0 && s.status === "idle" && !s.staged) {
+      // A session created by `new_session` is seeded with its handover as a
+      // real entry, so it is never empty and never reaches this branch.
+      if (s.entries.length === 0 && s.status === "idle") {
         // An empty placeholder may still hold a lock (the startup session this
         // terminal began on). Drop it, or the session id stays locked until the
         // stale timeout even though the session is gone from this terminal.
@@ -1770,16 +1767,12 @@ export class App {
     const images = this.pendingImages;
     this.pendingImages = [];
 
-    // A session holding an unsent handover is empty but not a placeholder: its
-    // text is the user's to review, so submitting here sends what they chose
-    // rather than auto-sending the handover as a fresh session's first message.
-    if (session.entries.length === 0 && !session.staged) {
+    if (session.entries.length === 0) {
       // startNewSessionWith runs the turn; hand it the attachments so the
       // image rides along with the first message rather than being lost --
       // and so the turn is started once, not once here and once below.
       this.startNewSessionWith(text, images);
     } else {
-      session.staged = false;
       this.input.clear();
       this.scrollToTail(); // jump back to the tail so you see the reply
       void session.run(
@@ -1788,7 +1781,8 @@ export class App {
         images,
         (summary, secrets) => this.askApproval(summary, secrets),
         (name, label, hidden) => this.askSecretInput(name, label, hidden)
-      ).then((res) => this.afterTurn(res));
+      ).then((res) => this.afterTurn(res))
+        .catch(() => {});
     }
     this.requestRender();
   }

@@ -71,19 +71,6 @@ export class Session {
   entries: Entry[];
   status: "idle" | "thinking" = "idle";
   /**
-   * True when the input holds an unsent handover from `new_session`.
-   *
-   * An empty session is normally a placeholder: submitting text to it starts a
-   * fresh session and sends that text as its first message (see the caller of
-   * `startNewSessionWith`). A session created by `new_session` is empty too, but
-   * its input already holds the handover the user is meant to review -- and
-   * sending that handover unread is precisely what the unsent staging exists to
-   * prevent. This flag tells the two apart, so a prompt in a held session is
-   * appended to the handover and sent normally rather than replacing the
-   * session's identity with an auto-sent first message.
-   */
-  staged = false;
-  /**
    * Tool calls currently in flight, for the status bar.
    *
    * Delegated to the agent rather than counted from this session's own events:
@@ -210,6 +197,42 @@ export class Session {
    */
   steer(text: string): void {
     this.agent.steer(text);
+  }
+
+  /**
+   * Seed a freshly created session with a handover from the session it was
+   * opened from.
+   *
+   * The handover goes in as an ordinary first user message rather than into the
+   * input box, for two reasons. It is *possessed* either way -- only what is in
+   * the messages reaches the model, and text parked in the input buffer reaches
+   * nothing until Enter is pressed -- whereas the input box asks the user to
+   * review and send something they did not write. Putting it in the history
+   * also means it is read exactly once, at creation, and from then on is just
+   * part of the conversation: it is never re-read from disk or rebuilt.
+   *
+   * The transcript gets a matching entry so the handover is visible when
+   * scrolling back, and the stored messages keep it for a reload.
+   *
+   * Labelled as a handover, not left bare: it is text a previous agent wrote,
+   * and presenting it as the user's own words would misrepresent an instruction
+   * the user never gave.
+   */
+  async seedHandover(preamble: string): Promise<void> {
+    const text = preamble.trim();
+    if (!text) return;
+    const body = `[handover from the previous session]\n\n${text}`;
+    this.entries.push({ role: "user", text: body });
+    // Stored directly rather than sent through `run`, which would put the
+    // session into a turn and spend a request before the user has asked for
+    // anything. `Agent` exposes the history it will send.
+    this.agent.messages.push({ role: "user", content: body });
+    this.updatedAt = Date.now();
+    // Written out now, not on the first turn. The handover is injected exactly
+    // once, from this call, so if it were only persisted when a message was
+    // sent it would be lost by restarting first -- and there is no second copy
+    // to recover it from.
+    await this.persist();
   }
 
   async run(
