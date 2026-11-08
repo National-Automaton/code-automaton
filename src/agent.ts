@@ -1075,7 +1075,11 @@ export class Agent {
           if (newSession && !openedNewSession) openedNewSession = newSession;
         }
         if (openedNewSession) return { newSession: openedNewSession };
-        return {};
+
+        // Fall through to the top of the loop so the model continues from its
+        // tool results. Returning here instead would end the turn after every
+        // single tool call -- the agent would run one command, stop, and go
+        // idle, and the user would have to prompt it again for each step.
       }
     } finally {
       // A turn is over however it ended -- finished, threw, or was abandoned
