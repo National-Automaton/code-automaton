@@ -71,6 +71,19 @@ export class Session {
   entries: Entry[];
   status: "idle" | "thinking" = "idle";
   /**
+   * True when the input holds an unsent handover from `new_session`.
+   *
+   * An empty session is normally a placeholder: submitting text to it starts a
+   * fresh session and sends that text as its first message (see the caller of
+   * `startNewSessionWith`). A session created by `new_session` is empty too, but
+   * its input already holds the handover the user is meant to review -- and
+   * sending that handover unread is precisely what the unsent staging exists to
+   * prevent. This flag tells the two apart, so a prompt in a held session is
+   * appended to the handover and sent normally rather than replacing the
+   * session's identity with an auto-sent first message.
+   */
+  staged = false;
+  /**
    * Tool calls currently in flight, for the status bar.
    *
    * Delegated to the agent rather than counted from this session's own events:

@@ -455,6 +455,16 @@ export class Agent {
    */
   private approvedSecrets = new Set<string>();
 
+  /**
+   * Whether this conversation has already opened a session.
+   *
+   * Set when the user approves, before the app acts on it: the turn that
+   * requested it may still make further tool calls, and each one must see the
+   * request as spent. Never cleared -- a session that has handed off has handed
+   * off, and the agent that set this is no longer the one being talked to.
+   */
+  openedSession = false;
+
   /** Names this session may spend without asking again. For the UI. */
   get approved(): string[] {
     return [...this.approvedSecrets];
@@ -567,6 +577,19 @@ export class Agent {
    * of the user anyway, and a wall of prose in a yes/no box buries the question.
    */
   private async openNewSession(args: any): Promise<ToolResult> {
+    // One session per conversation. The user is moved to a fresh session the
+    // moment this is honoured, so a second request can only ever arrive from an
+    // agent that has not noticed it already moved -- and acting on it would
+    // switch the user out of *that* session too, again and again. The tool is
+    // for handing work off, once; anything else is a loop, not a request.
+    if (this.openedSession) {
+      return {
+        ok: false,
+        output:
+          "new_session: a session has already been opened from this one. Do not " +
+          "open another; the user is in the new session now. Continue there.",
+      };
+    }
     const title =
       typeof args?.title === "string" && args.title.trim()
         ? args.title.trim().slice(0, 200)
@@ -604,6 +627,10 @@ export class Agent {
       };
     }
 
+    // Spend the request before reporting it: anything else this turn does must
+    // not open a second session.
+    this.openedSession = true;
+
     return {
       ok: true,
       output:
@@ -612,6 +639,7 @@ export class Agent {
       newSession: { title, preamble },
     };
   }
+
 
   /**
    * Collect credentials the task needs but the vault does not have.
@@ -1025,16 +1053,33 @@ export class Agent {
             this.toolPeak = Math.max(this.toolPeak, running);
           }
         );
+        // Every result is committed before anything else happens. A turn that
+        // asked for four tools and got four results back must leave four `tool`
+        // messages in the history: an `assistant` turn with unanswered tool
+        // calls is rejected by every provider, which strands the session.
+        //
+        // The user approved a new session. Nothing more will ever be done in
+        // *this* one -- the app is about to switch away from it -- so the turn
+        // ends here and the request is returned to the caller. Continuing to
+        // ask the model for more tool calls would spend tokens on a
+        // conversation nobody is looking at.
+        //
+        // Note the return happens *after* the loop, not inside it. Returning
+        // from the middle left the remaining results unwritten, so the turn
+        // ended on a dangling `tool` message -- the exact shape that breaks
+        // the following request. Only the first approval is honoured; a model
+        // that asks twice still opens one session.
+        let openedNewSession: { title?: string; preamble?: string } | undefined;
         for (const { id, output, newSession } of results) {
           this.messages.push({ role: "tool", tool_call_id: id, content: output });
-          // The user approved a new session. Nothing more will ever be done in
-          // *this* one -- the app is about to switch away from it -- so the turn
-          // ends here and the request is returned to the caller. Continuing to
-          // ask the model for more tool calls would spend tokens on a
-          // conversation nobody is looking at.
-          if (newSession) return { newSession };
+          if (newSession && !openedNewSession) openedNewSession = newSession;
         }
-        return {};
+        if (openedNewSession) return { newSession: openedNewSession };
+
+        // Fall through to the top of the loop so the model continues from its
+        // tool results. Returning here instead would end the turn after every
+        // single tool call -- the agent would run one command, stop, and go
+        // idle, and the user would have to prompt it again for each step.
       }
     } finally {
       // A turn is over however it ended -- finished, threw, or was abandoned
