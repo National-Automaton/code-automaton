@@ -1774,7 +1774,7 @@ export class App {
         images,
         (summary, secrets) => this.askApproval(summary, secrets),
         (name, label, hidden) => this.askSecretInput(name, label, hidden)
-      );
+      ).then((res) => this.afterTurn(res));
     }
     this.requestRender();
   }
