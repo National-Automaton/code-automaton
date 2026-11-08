@@ -41,7 +41,9 @@ Keys:
   →← / Home / End Move the cursor (Ctrl+A / Ctrl+E for line start / end)
   Ctrl+W / Alt+D  Delete previous / next word
   Ctrl+U / Ctrl+K Delete to start / end of line
-  ↑ / ↓           Scroll transcript (PgUp / PgDn for a page, wheel also works)
+  ↑ / ↓           Recall a previous prompt from this session, and edit it.
+                  ↓ steps forward again, back to the half-typed draft.
+  PgUp / PgDn     Scroll the transcript a page (the wheel scrolls too)
   End             While scrolled back, return to the newest output
   Ctrl+R          Open the session picker:
                     type + Enter  = start a new session with that message

@@ -130,6 +130,29 @@ export function imagePathsIn(
 }
 
 /**
+ * The image paths named by a transcript line, in the order they appear.
+ *
+ * `Session.run` labels a message that went out with attachments as
+ * `"<text> [image: <path>] [image: <path>]"`, and that label is the only
+ * record the *transcript* keeps of them -- the pixels are not in the entry.
+ * Prompt recall reads them back out with this so a recalled message comes back
+ * with its screenshot attached, rather than as the same words with the image
+ * quietly missing.
+ *
+ * Distinct from `imagePathsIn`, which reads the model's history (where each
+ * path is a separate part); here the markers are inside one line of text.
+ */
+export function imagePathsInText(text: string): string[] {
+  const found: string[] = [];
+  // Anchored markers first, for the common case of the label at the tail.
+  for (const part of text.split(/(?=\[image(?: sent)?: )/)) {
+    const m = IMAGE_MARKER.exec(part.trim());
+    if (m) found.push(m[1]);
+  }
+  return found;
+}
+
+/**
  * Delete cached images no session refers to any more.
  *
  * The cache is content-addressed, so one file can be referenced by several

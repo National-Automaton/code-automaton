@@ -48,7 +48,7 @@ current session's position and title.
 | `Alt+D` | Delete next word |
 | `Ctrl+U` / `Ctrl+K` | Delete to start / end of line |
 | `Alt+B` / `Alt+F` | Move back / forward one word |
-| `↑` / `↓` | Scroll transcript one line |
+| `↑` / `↓` | Recall a previous prompt in this session (edit it, then Enter to resend) |
 | `PgUp` / `PgDn` | Scroll transcript one page |
 | Mouse wheel | Scroll transcript (3 lines per notch) |
 | `End` (scrolled back) | Jump back to the newest output |
@@ -92,14 +92,39 @@ left by a terminal that crashed goes stale on its own (a dead process on the
 same machine, or a heartbeat older than 30 seconds across machines) and is
 taken over automatically.
 
+### Recalling a prompt
+
+**`↑`** brings back the last prompt you sent in this session, so you can tweak it
+and press Enter again instead of retyping it. Press it again to walk further
+back, and **`↓`** to walk forward again.
+
+The half-typed message you had in the input is not lost: it is held as the
+draft, and stepping `↓` past the newest prompt puts it back exactly as it was,
+caret included. `Esc` clears the line and ends the walk. Prompts sent with an
+image come back with the image re-attached.
+
+- The list is rebuilt from the session's transcript, so it survives switching
+  sessions — reopening a saved session recalls its prompts, not just the ones
+  sent since `coda` started.
+- Slash commands are not recalled: `/model` is a command, not a message, and
+  recalling it into the input would present it as one.
+- A prompt typed mid-turn (folded into a running turn with Enter) is recalled
+  without the `(mid-turn)` label the transcript shows against it.
+- Recall is per session; switching sessions starts a fresh list.
+
+Scrolling is **`PgUp`/`PgDn`** and the wheel; see [Scrolling back](#scrolling-back).
+
 ### Scrolling back
 
 Long answers and tool output scroll past the visible window. `coda` keeps the
 whole transcript of the session and scrolls through it:
 
 - **Mouse wheel** — scrolls the transcript a few lines per notch.
-- **`↑`/`↓`** — one line at a time; **`PgUp`/`PgDn`** — a page.
+- **`PgUp`/`PgDn`** — a page at a time.
 - **`End`** — returns to the newest output.
+
+`↑`/`↓` are *not* scrolling: they recall previous prompts. See
+[Recalling a prompt](#recalling-a-prompt).
 
 The header shows `▲ scrolled back N` while you are reading history. Scrolling is
 independent of streaming: a reply that is still arriving keeps appending at the
@@ -151,9 +176,9 @@ export CODA_MOUSE=off
 ```
 
 `coda` then leaves the mouse alone — the terminal's own drag-to-select and wheel
-scrollback work as usual — and the transcript is scrolled with **`↑`/`↓`**,
-**`PgUp`/`PgDn`**, and **`End`** instead. This is the fix when a terminal does
-not honour Shift-to-select, or when Shift-drag selects unreliably.
+scrollback work as usual — and the transcript is scrolled with **`PgUp`/`PgDn`**
+and **`End`** instead. This is the fix when a terminal does not honour
+Shift-to-select, or when Shift-drag selects unreliably.
 
 `coda` also repaints its frame in place rather than erasing the screen on every
 render. A full-screen erase per frame — and with a streaming reply there is one
