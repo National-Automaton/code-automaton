@@ -105,6 +105,38 @@ export const toolDefinitions: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "new_session",
+      description:
+        "Open a new session in this coda, exactly as Ctrl+T does, optionally " +
+        "naming it. Use this when the user asks to start a session, or when the " +
+        "work needs a clean context -- for example because standing instructions " +
+        "changed and the current session already carries the old ones as history. " +
+        "Pass the handover in `preamble` rather than describing it here: this " +
+        "session's transcript is not visible in the new one. The user is asked to " +
+        "confirm before anything is created.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: {
+            type: "string",
+            description:
+              "Name for the new session. Without one, the session is named from " +
+              "its first message as usual.",
+          },
+          preamble: {
+            type: "string",
+            description:
+              "Optional opening message for the new session: the handover the " +
+              "new session needs to continue. It is placed in the new session's " +
+              "input, unsent, so the user can review it before pressing Enter.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "request_secret",
       description:
         "Ask the user for a credential and store it in the credentials vault. " +
@@ -209,6 +241,15 @@ export interface ToolResult {
     /** Human-readable summary for the prompt. */
     summary: string;
   };
+  /**
+   * Set by `new_session` when the user approved the new session.
+   *
+   * The tool itself cannot make a session -- that is the app's job, and
+   * `tools.ts` has no terminal. So the tool returns the decision and the app
+   * acts on it in the caller's context. `preamble` is the handover text to
+   * leave in the new session's input, unsent.
+   */
+  newSession?: { title?: string; preamble?: string };
 }
 
 /** Names of the `{{secret:NAME}}` placeholders in `text`. */
@@ -576,6 +617,18 @@ export async function runTool(name: string, args: any): Promise<ToolResult> {
           maxBuffer: 10 * 1024 * 1024,
         });
         return { ok: true, output: clampOutput((stdout + stderr).trim() || "(no output)") };
+      }
+      case "new_session": {
+        // Refused here rather than in the app: `runTool` is also called by the
+        // approval path and by tests, neither of which has a terminal to put a
+        // new session in. A tool that claimed to have made one when it had not
+        // would leave the model waiting for a session that does not exist.
+        return {
+          ok: false,
+          output:
+            "new_session: this session cannot open a new one (no UI attached). " +
+            "Ask the user to press Ctrl+T.",
+        };
       }
       case "use_secret": {
         // Confirmation is the agent's job (see `Agent.send`): this is a plain

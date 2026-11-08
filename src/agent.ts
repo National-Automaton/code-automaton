@@ -240,7 +240,16 @@ export async function runToolCalls(
   run: (name: string, args: any) => Promise<ToolResult>,
   parallel = true,
   onRunning: (running: number) => void = () => {}
-): Promise<Array<{ id: string; name: string; ok: boolean; output: string; attach?: string[] }>> {
+): Promise<
+  Array<{
+    id: string;
+    name: string;
+    ok: boolean;
+    output: string;
+    attach?: string[];
+    newSession?: { title?: string; preamble?: string };
+  }>
+> {
   const batch = parallel ? parallelBatch(calls) : [];
 
   // Announce every call before any of them runs, so the transcript shows the
@@ -258,7 +267,14 @@ export async function runToolCalls(
   let running = batch.length;
   onRunning(running);
 
-  const results: Array<{ id: string; name: string; ok: boolean; output: string; attach?: string[] }> = [];
+  const results: Array<{
+    id: string;
+    name: string;
+    ok: boolean;
+    output: string;
+    attach?: string[];
+    newSession?: { title?: string; preamble?: string };
+  }> = [];
   for (let i = 0; i < calls.length; i++) {
     const call = calls[i];
     let pending = started.get(i);
@@ -279,6 +295,9 @@ export async function runToolCalls(
       ok: result.ok,
       output: result.output,
       ...(result.attach?.length ? { attach: result.attach } : {}),
+      // Carried out of `runToolCalls` so the caller can act on it. Creating the
+      // session needs the app's terminal; nothing at this level has one.
+      ...(result.newSession ? { newSession: result.newSession } : {}),
     });
   }
   return results;
@@ -462,6 +481,12 @@ export class Agent {
     // spent" but "do not let this silently overwrite something already stored".
     if (name === "request_secret") return this.requestSecrets(args);
 
+    // `new_session` is gated, and the gate is the whole feature: an agent that
+    // can spawn sessions unasked could strand the user in a terminal that no
+    // longer shows the conversation they were reading. The confirmation reuses
+    // the `use_secret` prompt deliberately -- one approval UI, one habit.
+    if (name === "new_session") return this.openNewSession(args);
+
     if (name !== "use_secret") return runTool(name, args);
 
     const argv: string[] = Array.isArray(args?.command) ? args.command.map(String) : [];
@@ -526,6 +551,66 @@ export class Agent {
   /** Forget every approval. For tests. */
   clearApprovals(): void {
     this.approvedSecrets.clear();
+  }
+
+  /**
+   * Open a new session, after the user agrees to it.
+   *
+   * The `App` owns sessions and the agent does not, so this method only decides
+   * and reports: it returns `newSession` in the result, and the app turns that
+   * into a session once the turn is over (see `App.afterTurn`). Keeping the
+   * creation out of here is what lets `Agent` stay testable with no terminal.
+   *
+   * The prompt reuses the `use_secret` confirmation callback rather than adding
+   * a second approval mechanism. It shows the title and the *length* of the
+   * handover, not the handover itself: the text is about to be placed in front
+   * of the user anyway, and a wall of prose in a yes/no box buries the question.
+   */
+  private async openNewSession(args: any): Promise<ToolResult> {
+    const title =
+      typeof args?.title === "string" && args.title.trim()
+        ? args.title.trim().slice(0, 200)
+        : undefined;
+    const preamble =
+      typeof args?.preamble === "string" && args.preamble.trim()
+        ? args.preamble
+        : undefined;
+
+    if (!this.confirm) {
+      return {
+        ok: false,
+        output:
+          "new_session: this session cannot ask the user, so no session was " +
+          "opened. Ask them to press Ctrl+T.",
+      };
+    }
+
+    const summary = [
+      title ? `Open a new session named "${title}"?` : "Open a new session?",
+      preamble
+        ? `  The new session's input will hold a ${preamble.length}-character ` +
+          "handover, unsent, for you to review.\n" +
+          "  You will move to the new session; this transcript stays in the list."
+        : "  An empty session will be opened; this transcript stays in the list.",
+    ].join("\n");
+
+    const answer = await this.confirm(summary, []);
+    if (answer === "no") {
+      return {
+        ok: false,
+        output:
+          "new_session: the user declined. Do not ask again in this turn; " +
+          "continue in this session, or ask what they would like instead.",
+      };
+    }
+
+    return {
+      ok: true,
+      output:
+        `new_session: opening a session${title ? ` named "${title}"` : ""}` +
+        (preamble ? " with the handover in its input." : "."),
+      newSession: { title, preamble },
+    };
   }
 
   /**
@@ -755,7 +840,7 @@ export class Agent {
     userInput: string,
     emit: (ev: AgentEvent) => void,
     images: AttachedImage[] = []
-  ): Promise<void> {
+  ): Promise<{ newSession?: { title?: string; preamble?: string } }> {
     if (images.length) {
       // Image parts are only accepted in `user` messages; tool results cannot
       // carry them. Annotate each part with its path so the session store can
@@ -905,7 +990,7 @@ export class Agent {
 
         if (!toolCalls.length) {
           emit({ type: "done" });
-          return;
+          return {};
         }
 
         // Run the tools. Independent read-only calls (see `parallelBatch`) are
@@ -940,9 +1025,16 @@ export class Agent {
             this.toolPeak = Math.max(this.toolPeak, running);
           }
         );
-        for (const { id, output } of results) {
+        for (const { id, output, newSession } of results) {
           this.messages.push({ role: "tool", tool_call_id: id, content: output });
+          // The user approved a new session. Nothing more will ever be done in
+          // *this* one -- the app is about to switch away from it -- so the turn
+          // ends here and the request is returned to the caller. Continuing to
+          // ask the model for more tool calls would spend tokens on a
+          // conversation nobody is looking at.
+          if (newSession) return { newSession };
         }
+        return {};
       }
     } finally {
       // A turn is over however it ended -- finished, threw, or was abandoned

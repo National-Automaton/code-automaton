@@ -450,6 +450,35 @@ Application password for runningafever.com:    ← typed hidden
 Ask for credentials through this, not in ordinary chat. A password typed as a
 chat message is in the transcript before anything can scrub it.
 
+#### Opening a session: `new_session`
+
+The agent can open a new session, exactly as `Ctrl+T` does, with a name and a
+handover already in the input:
+
+```jsonc
+{ "title": "release 1.14.0",
+  "preamble": "Handover from the previous session:\n…" }
+```
+
+The reason this exists: standing instructions are read when a turn starts and
+carry through a session's history, so **editing them does not reach a session
+that is already running**. The only clean way to pick up new rules is a new
+session — and the handover is the part that used to be retyped by hand.
+
+- **You are always asked first.** The prompt shows the title and the *size* of the
+  handover, not the text itself (it is about to be in front of you anyway).
+  Anything that is not a yes opens nothing.
+- **The handover is placed unsent.** It lands in the new session's input, so you
+  can read it before it becomes the first message — and, because an untitled
+  session takes its name from that first line, a title you passed is kept either
+  way.
+- **The old session is left alone**, not closed: if the new one is not what you
+  wanted, it is still in the picker and `Ctrl+X` is there if you want it gone.
+  Its turn is persisted before the switch.
+- **The new session inherits the directory, not a new one.** Like `Ctrl+T`, the
+  working directory belongs to the process, so this cannot move you to a
+  different project — restart coda for that.
+
 #### Spending a credential: `use_secret`
 
 The agent can *use* a credential without seeing it. It writes the command with
