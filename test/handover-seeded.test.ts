@@ -13,8 +13,9 @@
  *
  * What matters here:
  *
- *  - it lands in `messages` (so the model has it) and in `entries` (so it is
- *    visible when scrolling back);
+ *  - it lands in `messages` (so the model has it) and *not* in `entries` (so it
+ *    is never drawn in the transcript -- it is context the session needs, not
+ *    something the user asked to see);
  *  - it is labelled as a handover, not passed off as the user's own words;
  *  - seeding does not start a turn -- the session stays idle;
  *  - the session is no longer "empty", so nothing prunes it as a placeholder.
