@@ -455,6 +455,16 @@ export class Agent {
    */
   private approvedSecrets = new Set<string>();
 
+  /**
+   * Whether this conversation has already opened a session.
+   *
+   * Set when the user approves, before the app acts on it: the turn that
+   * requested it may still make further tool calls, and each one must see the
+   * request as spent. Never cleared -- a session that has handed off has handed
+   * off, and the agent that set this is no longer the one being talked to.
+   */
+  openedSession = false;
+
   /** Names this session may spend without asking again. For the UI. */
   get approved(): string[] {
     return [...this.approvedSecrets];
@@ -567,6 +577,19 @@ export class Agent {
    * of the user anyway, and a wall of prose in a yes/no box buries the question.
    */
   private async openNewSession(args: any): Promise<ToolResult> {
+    // One session per conversation. The user is moved to a fresh session the
+    // moment this is honoured, so a second request can only ever arrive from an
+    // agent that has not noticed it already moved -- and acting on it would
+    // switch the user out of *that* session too, again and again. The tool is
+    // for handing work off, once; anything else is a loop, not a request.
+    if (this.openedSession) {
+      return {
+        ok: false,
+        output:
+          "new_session: a session has already been opened from this one. Do not " +
+          "open another; the user is in the new session now. Continue there.",
+      };
+    }
     const title =
       typeof args?.title === "string" && args.title.trim()
         ? args.title.trim().slice(0, 200)
@@ -604,6 +627,10 @@ export class Agent {
       };
     }
 
+    // Spend the request before reporting it: anything else this turn does must
+    // not open a second session.
+    this.openedSession = true;
+
     return {
       ok: true,
       output:
@@ -612,6 +639,7 @@ export class Agent {
       newSession: { title, preamble },
     };
   }
+
 
   /**
    * Collect credentials the task needs but the vault does not have.

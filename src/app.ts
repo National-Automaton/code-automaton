@@ -1181,6 +1181,11 @@ export class App {
     if (req.preamble) {
       this.input.clear();
       this.input.set(req.preamble);
+      // The handover is staged unsent, and the session must stay that way until
+      // the user acts on it. Without this the session is an empty placeholder,
+      // and the first prompt typed into it would auto-send the handover as a
+      // brand-new session's opening message.
+      fresh.staged = true;
     }
     this.scrollToTail();
     this.requestRender();
@@ -1760,12 +1765,16 @@ export class App {
     const images = this.pendingImages;
     this.pendingImages = [];
 
-    if (session.entries.length === 0) {
+    // A session holding an unsent handover is empty but not a placeholder: its
+    // text is the user's to review, so submitting here sends what they chose
+    // rather than auto-sending the handover as a fresh session's first message.
+    if (session.entries.length === 0 && !session.staged) {
       // startNewSessionWith runs the turn; hand it the attachments so the
       // image rides along with the first message rather than being lost --
       // and so the turn is started once, not once here and once below.
       this.startNewSessionWith(text, images);
     } else {
+      session.staged = false;
       this.input.clear();
       this.scrollToTail(); // jump back to the tail so you see the reply
       void session.run(

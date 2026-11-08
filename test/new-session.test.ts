@@ -260,12 +260,56 @@ try {
     });
     const out = await a.send("open", () => {});
     assert.deepEqual(out.newSession, { title: "dup", preamble: undefined });
-    assert.equal(asked, 2, "each call is confirmed");
+    // The second call is refused without prompting: the request is spent.
+    assert.equal(asked, 1, "only the first call reaches the user");
     const replies = a.messages.filter((m: any) => m.role === "tool");
-    assert.equal(replies.length, 2, "both results are committed");
+    assert.equal(replies.length, 2, "both results are still committed");
   }
 } finally {
   (globalThis as any).fetch = realFetch;
+}
+
+// --- a conversation may open one session, not many ------------------------
+//
+// Regression: without this guard, every later turn that called `new_session`
+// was honoured, and each one moved the user out of the session they were in.
+// Seen in practice as a session list filling with shells and the user's next
+// prompt landing somewhere they did not expect.
+
+{
+  const a: any = new Agent(config);
+  let asked = 0;
+  a.setConfirm(async () => {
+    asked++;
+    return "yes";
+  });
+
+  const first = await gate(a, "new_session", { title: "handover", preamble: "PLAN" });
+  assert.equal(first.ok, true, first.output);
+  assert.deepEqual(first.newSession, { title: "handover", preamble: "PLAN" });
+
+  const second = await gate(a, "new_session", { title: "again" });
+  assert.equal(second.ok, false, "a second session must not be opened");
+  assert.equal(second.newSession, undefined, "nothing must be requested");
+  assert.equal(asked, 1, "the user must not be asked twice");
+  assert.ok(/already been opened/.test(second.output), second.output);
+}
+
+// --- a decline does not spend the one session ----------------------------
+
+{
+  const a: any = new Agent(config);
+  let answer: "yes" | "no" = "no";
+  a.setConfirm(async () => answer);
+
+  const declined = await gate(a, "new_session", { title: "x" });
+  assert.equal(declined.ok, false);
+  assert.equal(a.openedSession, false, "a decline must not spend the request");
+
+  answer = "yes";
+  const accepted = await gate(a, "new_session", { title: "x" });
+  assert.equal(accepted.ok, true, "a later request may still succeed");
+  assert.equal(a.openedSession, true);
 }
 
 console.log("new-session: ok");
