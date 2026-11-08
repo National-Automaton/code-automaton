@@ -1,6 +1,7 @@
 import { Config } from "./config.js";
 import { Key, KeyReader } from "./keys.js";
-import { LineBuffer } from "./linebuffer.js";
+import { LineBuffer, PromptRecall } from "./linebuffer.js";
+import type { RecalledPrompt } from "./linebuffer.js";
 import { Screen, PickerItem } from "./screen.js";
 import { Session } from "./session.js";
 import { lockHolder } from "./lock.js";
@@ -30,6 +31,7 @@ import {
   clipboardContents,
   clipboardImagePath,
   imagePathsIn,
+  imagePathsInText,
   pruneImageCache,
   ImageError,
 } from "./image.js";
@@ -76,6 +78,14 @@ export class App {
    */
   private activeId: string | null = null;
   private input = new LineBuffer();
+  /**
+   * The prompts ↑/↓ walk back through, and the draft being edited.
+   *
+   * Reset whenever the input is cleared for a reason other than sending -- a
+   * new session, closing one, opening a picker entry -- because the draft it
+   * holds belongs to the session it was typed in.
+   */
+  private recall = new PromptRecall<string>();
   /** Picker state: highlighted row and the "start a new session" field. */
   private picker: {
     index: number;
@@ -1146,6 +1156,7 @@ export class App {
     if (leaving) void leaving.release();
     this.claimActive();
     this.input.clear();
+    this.recall.reset();
     this.scrollToTail();
     if (session.status === "idle") {
       void session.run(
@@ -1260,6 +1271,7 @@ export class App {
     const leaving = this.current();
     this.setActive(session);
     this.input.clear();
+    this.recall.reset();
     this.scrollToTail();
     this.requestRender();
 
@@ -1345,6 +1357,9 @@ export class App {
         return;
       case "escape":
         b.clear();
+        // Abandoning the line also ends the walk, so a later ↑ starts from
+        // an empty draft rather than resurrecting the one just discarded.
+        this.recall.reset();
         this.requestRender();
         return;
       case "right":
@@ -1375,11 +1390,15 @@ export class App {
         b.deleteForward();
         this.requestRender();
         return;
+      // ↑/↓ are prompt recall, not transcript scrolling: they walk back
+      // through the messages already sent in this session and edit what they
+      // bring up. Reading the transcript is PgUp/PgDn (and the wheel), which
+      // do the whole page at a time and are left where they were.
       case "up":
-        this.scrollBy(1);
+        this.recallUp();
         return;
       case "down":
-        this.scrollBy(-1);
+        this.recallDown();
         return;
       case "pageup":
         this.scrollPage(1);
@@ -1486,7 +1505,9 @@ export class App {
         "  Alt+R               Rename the current session",
         "  In the picker:  ↑/↓ move · Enter open · Ctrl+X delete · Alt+R rename",
         "  Ctrl+V              Attach a clipboard image (image-only clipboard)",
-        "  ↑ / ↓  PgUp / PgDn  Scroll transcript · End returns to the newest output",
+        "  ↑ / ↓               Recall a previous prompt (edits in place; ↓ back to the draft)",
+        "  PgUp / PgDn         Scroll the transcript a page · wheel also scrolls",
+        "  End                 While scrolled back, return to the newest output",
         "  Ctrl+C              Exit",
     ];
   }
@@ -1530,6 +1551,92 @@ export class App {
   private scrollToTail(): void {
     this.scroll = 0;
     this.scrollTop = -1;
+  }
+
+  /**
+   * The prompts from this session that ↑/↓ can walk back through, newest
+   * first, each paired with the paths of the images it was sent with.
+   *
+   * Built from the session's transcript on every keypress rather than kept in
+   * a list of its own. The transcript is what the user saw go out, it is
+   * already saved and restored with the session, and rebuilding it costs
+   * nothing next to a keystroke -- whereas a parallel list would have to be
+   * appended to on every send path (a new session, the picker, a steer) and
+   * could quietly drift out of step.
+   *
+   * Two things are left out. Slash commands never became prompts, so recalling
+   * `/model` with ↑ would put a command in the input dressed up as a message.
+   * Mid-turn steers are prefixed in the transcript with `(mid-turn)` -- a label
+   * for the reader, not part of what was typed -- so it is stripped off.
+   *
+   * `Session.run` writes the attachments into the entry as `[image: <path>]`
+   * labels, which is the one place the transcript still remembers them. They
+   * are read back out so a recalled prompt is not silently restored as the
+   * same words with the screenshot quietly dropped. Paths, not `AttachedImage`
+   * objects: the bytes are re-read from the cached copy on restore, which is
+   * what `attachImage` expects anyway.
+   */
+  private recallItems(): RecalledPrompt<string>[] {
+    const items: RecalledPrompt<string>[] = [];
+    for (const e of this.current().entries) {
+      if (e.role !== "user") continue;
+      const text = e.text.replace(/^\(mid-turn\) /, "");
+      if (!text.trim() || text.startsWith("/")) continue;
+      items.push({ text, images: imagePathsInText(text) });
+    }
+    return items.reverse();
+  }
+
+  /** ↑: recall the previous prompt into the input. */
+  private recallUp(): void {
+    this.recall.setItems(this.recallItems());
+    const next = this.recall.up(this.input.value, this.input.cursor);
+    if (!next) {
+      // At the oldest prompt. Say so rather than doing nothing silently: a key
+      // that appears broken is worse than one that explains itself.
+      if (this.recall.active) this.systemNote("oldest prompt in this session");
+      return;
+    }
+    this.restoreRecalled(next);
+  }
+
+  /** ↓: come forward again, past the newest prompt to the draft. */
+  private recallDown(): void {
+    if (!this.recall.active) return; // a fresh draft: nothing to walk out of
+    this.recall.setItems(this.recallItems());
+    const next = this.recall.down(this.input.value);
+    if (!next) return;
+    this.restoreRecalled(next);
+  }
+
+  /**
+   * Put a recalled prompt in the input, replacing whatever is there.
+   *
+   * The staged attachments are replaced, not merged: the recalled message is
+   * the whole message, and a screenshot left over from the draft would go out
+   * with a prompt it was never meant to accompany.
+   *
+   * Re-attaching is asynchronous -- the bytes come off the image cache -- but
+   * the text is not made to wait on it. A keypress that did not paint until a
+   * multi-megabyte screenshot had been read would feel stuck, and the image
+   * only has to be in place by the time Enter is pressed.
+   */
+  private restoreRecalled(p: { text: string; cursor: number; images: string[] }): void {
+    this.input.set(p.text, p.cursor);
+    this.pendingImages = [];
+    this.requestRender();
+    if (!p.images.length) return;
+    // Tagged with the text they belong to. Recall can run again before the
+    // read finishes (a fast ↑↑, or ↓ back to the draft), and the late result
+    // must not land on whatever is in the input by then.
+    const forText = p.text;
+    void Promise.all(p.images.map((path) => attachImage(path).catch(() => null)))
+      .then((loaded) => {
+        if (this.input.value !== forText) return;
+        this.pendingImages = loaded.filter((i): i is AttachedImage => i !== null);
+        this.requestRender();
+      })
+      .catch(() => {});
   }
 
   private scrollBy(delta: number): void {
@@ -1708,6 +1815,7 @@ export class App {
     if (leaving) void leaving.release();
     this.claimActive();
     this.input.clear();
+    this.recall.reset();
     this.scrollToTail();
     this.requestRender();
   }
@@ -1715,6 +1823,7 @@ export class App {
   private closeActive(): void {
     this.closeSession(this.current());
     this.input.clear();
+    this.recall.reset();
     this.scrollToTail();
     this.requestRender();
   }
@@ -1757,6 +1866,7 @@ export class App {
       // running tools is only moments away.
       session.steer(text);
       this.input.clear();
+      this.recall.reset();
       this.scrollToTail();
       this.requestRender();
       return;
@@ -1780,6 +1890,7 @@ export class App {
       this.startNewSessionWith(text, images);
     } else {
       this.input.clear();
+      this.recall.reset();
       this.scrollToTail(); // jump back to the tail so you see the reply
       void session.run(
         text,
@@ -1803,7 +1914,9 @@ export class App {
     // to the command line the command was typed on. `clrInput` therefore only
     // clears when the command came from the chat input itself.
     const clrInput = () => {
-      if (!fromPicker) this.input.clear();
+      if (fromPicker) return;
+      this.input.clear();
+      this.recall.reset();
     };
     // `/image <path>` attaches a screenshot to the next message instead of
     // sending it. Images cannot travel through a tool result, so they are

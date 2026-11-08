@@ -389,9 +389,10 @@ export class Screen {
    * Rows the transcript will occupy in the next frame for `input`.
    *
    * Scroll clamping uses this because it runs *before* the render that consumes
-   * the offset: the old code read the previous frame's value, so the first `↑`
-   * of a turn clamped against a stale budget -- and the very first one clamped
-   * against the fallback -- leaving the transcript unable to scroll back.
+   * the offset: the old code read the previous frame's value, so the first
+   * PgUp of a turn clamped against a stale budget -- and the very first one
+   * clamped against the fallback -- leaving the transcript unable to scroll
+   * back.
    */
   viewportRowsForInput(input: string): number {
     return this.viewportRowsFor(input, this.cols, this.rows);
@@ -418,8 +419,8 @@ export class Screen {
   /**
    * `mouse` selects whether terminal mouse reporting is enabled. When false,
    * the wheel is left to the terminal (which keeps drag-to-select working) and
-   * coda simply never receives wheel events -- the Up/Down/PgUp/PgDn keys still
-   * scroll the transcript.
+   * coda simply never receives wheel events -- the PgUp/PgDn keys still
+   * scroll the transcript (Up/Down are prompt recall, not scrolling).
    *
    * `version` is shown after the brand in the header. It is passed in rather
    * than read from package.json here so the renderer stays free of file I/O.
