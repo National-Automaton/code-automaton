@@ -1198,7 +1198,12 @@ export class App {
   private pruneEmptySessions(): void {
     for (let i = this.sessions.length - 1; i >= 0; i--) {
       const s = this.sessions[i];
-      if (s.entries.length === 0 && s.status === "idle") {
+      // A staged session is empty too, but its input holds a handover the user
+      // has not reviewed yet. Pruning it would delete the very thing
+      // `new_session` created, and creating the next session would destroy the
+      // previous one before it was ever seen -- so `staged` is excluded here,
+      // exactly as it is in `submitPrompt`.
+      if (s.entries.length === 0 && s.status === "idle" && !s.staged) {
         // An empty placeholder may still hold a lock (the startup session this
         // terminal began on). Drop it, or the session id stays locked until the
         // stale timeout even though the session is gone from this terminal.
