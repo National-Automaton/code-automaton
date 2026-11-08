@@ -1,5 +1,6 @@
 import { Agent, AgentEvent } from "./agent.js";
 import type { AttachedImage } from "./image.js";
+import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { Config } from "./config.js";
 import { SessionLock, acquireLock, describeHolder } from "./lock.js";
 import { redact } from "./secrets.js";
@@ -60,6 +61,21 @@ import {
 } from "./store.js";
 
 /**
+ * Marker `seedHandover` puts at the head of a handover message.
+ *
+ * Labelled rather than left bare: the text is a previous agent's notes, and
+ * presenting it as the user's own words would misrepresent an instruction the
+ * user never gave. It doubles as the way a seeded session is recognised --
+ * see `Session.seeded`.
+ */
+const HANDOVER_MARKER = "[handover from the previous session]";
+
+/** True when a message body is a seeded handover rather than real user text. */
+function isHandoverText(content: ChatCompletionMessageParam["content"]): boolean {
+  return typeof content === "string" && content.startsWith(HANDOVER_MARKER);
+}
+
+/**
  * A live session: one Agent, its transcript entries, and its current status.
  * Output is buffered here so switching away from a busy session and back
  * again shows everything that accumulated.
@@ -70,19 +86,6 @@ export class Session {
   readonly cwd: string;
   entries: Entry[];
   status: "idle" | "thinking" = "idle";
-  /**
-   * True when the input holds an unsent handover from `new_session`.
-   *
-   * An empty session is normally a placeholder: submitting text to it starts a
-   * fresh session and sends that text as its first message (see the caller of
-   * `startNewSessionWith`). A session created by `new_session` is empty too, but
-   * its input already holds the handover the user is meant to review -- and
-   * sending that handover unread is precisely what the unsent staging exists to
-   * prevent. This flag tells the two apart, so a prompt in a held session is
-   * appended to the handover and sent normally rather than replacing the
-   * session's identity with an auto-sent first message.
-   */
-  staged = false;
   /**
    * Tool calls currently in flight, for the status bar.
    *
@@ -139,6 +142,26 @@ export class Session {
    * persisted, so only genuinely new ones are exempt.
    */
   persisted: boolean;
+  /**
+   * True when a handover has been seeded into the history.
+   *
+   * A seeded session has no entries -- the handover is history, not transcript,
+   * so it is never drawn -- and that makes it look untouched: `persist` would
+   * skip the write and lose the handover on reload, and `submitPrompt` would
+   * read it as an empty placeholder and open a *second* session for the user's
+   * first message, dropping the handover. Both have to tell the two apart.
+   *
+   * Derived from the history rather than recorded as a flag, because a flag has
+   * to be written to disk and restored to survive a restart, and every path
+   * that builds a session from a record would have to remember to restore it.
+   * Deriving it from the message `seedHandover` writes means a reloaded session
+   * is seeded for the same reason a fresh one is, and the two can never drift.
+   */
+  get seeded(): boolean {
+    return this.agent.messages.some(
+      (m) => m.role === "user" && isHandoverText(m.content)
+    );
+  }
 
   constructor(
     private config: Config,
@@ -210,6 +233,61 @@ export class Session {
    */
   steer(text: string): void {
     this.agent.steer(text);
+  }
+
+  /**
+   * Seed a freshly created session with a handover from the session it was
+   * opened from.
+   *
+   * The handover goes in as an ordinary first user message rather than into the
+   * input box, for two reasons. It is *possessed* either way -- only what is in
+   * the messages reaches the model, and text parked in the input buffer reaches
+   * nothing until Enter is pressed -- whereas the input box asks the user to
+   * review and send something they did not write. Putting it in the history
+   * also means it is read exactly once, at creation, and from then on is just
+   * part of the conversation: it is never re-read from disk or rebuilt.
+   *
+   * The transcript gets no matching entry: the handover is context the session
+   * needs, not something the user asked to see. The stored messages keep it, so
+   * it survives a reload without ever being drawn.
+   *
+   * Labelled as a handover, not left bare: it is text a previous agent wrote,
+   * and presenting it as the user's own words would misrepresent an instruction
+   * the user never gave.
+   */
+  /**
+   * The history this session will send, for callers that need to inspect it
+   * (tests, and anything checking what a session actually holds).
+   *
+   * Read-only: mutating it from outside would bypass `persist`, so the array is
+   * copied. `seedHandover` is the one supported way to add to it.
+   */
+  get history(): ChatCompletionMessageParam[] {
+    return [...this.agent.messages];
+  }
+
+  async seedHandover(preamble: string): Promise<void> {
+    const text = preamble.trim();
+    if (!text) return;
+    const body = `${HANDOVER_MARKER}\n\n${text}`;
+    // Deliberately NOT added to `entries`: the transcript is what is drawn on
+    // screen, and the handover is context the new session needs, not something
+    // the user asked to see. Printing it put a wall of the previous session's
+    // notes in front of them every time a session was opened. The message alone
+    // is what reaches the model; `toRecord` saves `messages` and `entries`
+    // independently, so the handover still survives a reload without being
+    // drawn.
+    //
+    // Stored directly rather than sent through `run`, which would put the
+    // session into a turn and spend a request before the user has asked for
+    // anything. `Agent` exposes the history it will send.
+    this.agent.messages.push({ role: "user", content: body });
+    this.updatedAt = Date.now();
+    // Written out now, not on the first turn. The handover is injected exactly
+    // once, from this call, so if it were only persisted when a message was
+    // sent it would be lost by restarting first -- and there is no second copy
+    // to recover it from.
+    await this.persist();
   }
 
   async run(
@@ -323,7 +401,13 @@ export class Session {
     // the name back to the default re-arms auto-titling (`rename`), and if the
     // guard stopped here the file on disk would still hold the old name while
     // this copy said otherwise.
-    if (this.entries.length === 0 && this.title === DEFAULT_TITLE && !this.persisted) return;
+    if (
+      this.entries.length === 0 &&
+      this.title === DEFAULT_TITLE &&
+      !this.persisted &&
+      !this.seeded
+    )
+      return;
     await save(this.toRecord());
     this.persisted = true;
   }
