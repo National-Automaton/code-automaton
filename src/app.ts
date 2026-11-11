@@ -5,7 +5,7 @@ import type { RecalledPrompt } from "./linebuffer.js";
 import { Screen, PickerItem } from "./screen.js";
 import { Session } from "./session.js";
 import { lockHolder } from "./lock.js";
-import { loadAll } from "./store.js";
+import { loadAll, loadAllWithMtime } from "./store.js";
 import type { SessionRecord } from "./store.js";
 import { loadCatalog, bareId } from "./models.js";
 import {
@@ -202,7 +202,8 @@ export class App {
     // guess, start on a fresh session: opening one you did not pick (and were
     // then typing into) was the wrong default. Past sessions stay one keypress
     // away via the picker, which Esc returns from to this new session.
-    const records = await loadAll();
+    const loaded = await loadAllWithMtime();
+    const records = loaded.map((l) => l.record);
 
     // Collect the images those records still refer to and drop any cache file
     // nothing mentions. Done here because the records are already parsed --
@@ -213,7 +214,11 @@ export class App {
       new Set(records.flatMap((rec) => imagePathsIn(rec.messages as any)))
     ).catch(() => {});
 
-    for (const rec of records) this.sessions.push(new Session(this.config, rec));
+    // The mtime each record was read at is carried into the session so a later
+    // save can tell whether the file has moved on since -- see #64.
+    for (const { record, mtimeMs } of loaded) {
+      this.sessions.push(new Session(this.config, record, mtimeMs));
+    }
     const fresh = new Session(this.config);
     this.sessions.push(fresh);
     this.setActive(fresh);
@@ -1706,8 +1711,11 @@ export class App {
    */
   private async refreshSessionsFromDisk(): Promise<void> {
     let records: SessionRecord[];
+    const mtimes = new Map<string, number | null>();
     try {
-      records = await loadAll();
+      const loaded = await loadAllWithMtime();
+      records = loaded.map((l) => l.record);
+      for (const l of loaded) mtimes.set(l.record.id, l.mtimeMs);
     } catch {
       return; // unreadable directory: keep the list we have
     }
@@ -1758,10 +1766,12 @@ export class App {
       const existing = byId.get(rec.id);
       if (existing) {
         if (existing.status === "idle" && rec.updatedAt > existing.updatedAt) {
-          existing.adopt(rec);
+          existing.adopt(rec, mtimes.get(rec.id) ?? null);
         }
       } else {
-        this.sessions.push(new Session(this.config, rec));
+        this.sessions.push(
+          new Session(this.config, rec, mtimes.get(rec.id) ?? null)
+        );
       }
     }
 

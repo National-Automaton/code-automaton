@@ -60,10 +60,35 @@ import {
   Entry,
   SessionRecord,
   deriveTitle,
+  SessionChangedOnDiskError,
+  loadAllWithMtime,
+  mtimeOfSession,
   newId,
   remove,
   save,
 } from "./store.js";
+
+/**
+ * This session was written by somebody else since it was loaded, so the copy in
+ * memory was replaced by what was on disk rather than overwriting it.
+ *
+ * Thrown after the reload, so the caller can tell the user that their change
+ * did not survive -- silently swapping the conversation under them would be
+ * worse than the overwrite this replaces.
+ */
+export class SessionReloadedError extends Error {
+  constructor(
+    readonly id: string,
+    /** True when the disk copy was newer, so unsaved work here was lost. */
+    readonly hadNewerCopyOnDisk: boolean
+  ) {
+    super(
+      `session ${id} changed on disk; reloaded it` +
+        (hadNewerCopyOnDisk ? " (unsaved changes in this terminal were discarded)" : "")
+    );
+    this.name = "SessionReloadedError";
+  }
+}
 
 /**
  * Marker `seedHandover` puts at the head of a handover message.
@@ -170,7 +195,9 @@ export class Session {
 
   constructor(
     private config: Config,
-    rec?: SessionRecord
+    rec?: SessionRecord,
+    /** `mtimeMs` the record was read at, so `persist` can detect a stale copy. */
+    loadedMtime: number | null = null
   ) {
     this.id = rec?.id ?? newId();
     this.cwd = rec?.cwd ?? process.cwd();
@@ -179,8 +206,20 @@ export class Session {
     this.updatedAt = rec?.updatedAt ?? Date.now();
     this.title = rec?.title ?? DEFAULT_TITLE;
     this.persisted = rec !== undefined;
+    this.loadedMtime = rec === undefined ? undefined : loadedMtime;
     this.agent = new Agent(config, rec?.messages);
   }
+
+  /**
+   * The file's `mtimeMs` when this session was read, or `undefined` when it is
+   * brand new and there is no file to compare against.
+   *
+   * `save` is refused when the file has moved on since, so a process holding a
+   * stale copy cannot silently discard a change somebody else wrote -- an
+   * external repair, another terminal, a script. Undefined means "nothing was
+   * there", so the first write always succeeds.
+   */
+  private loadedMtime: number | null | undefined;
 
   /** True once this terminal holds the session's lock. */
   get lockHeld(): boolean {
@@ -356,7 +395,25 @@ export class Session {
     } finally {
       this.status = "idle";
       this.updatedAt = Date.now();
-      await this.persist();
+      try {
+        await this.persist();
+      } catch (err) {
+        // This session was written elsewhere while the turn ran, so `persist`
+        // reloaded the disk copy instead of overwriting it. That is the right
+        // call, but it must not be silent -- and it must not mask whatever the
+        // turn itself produced, nor leave `status` stuck at "thinking".
+        if (err instanceof SessionReloadedError) {
+          this.entries.push({
+            role: "assistant",
+            text:
+              `error: ${err.message}. Another terminal or tool changed this ` +
+              `session while the turn was running, so that copy has been ` +
+              `reloaded here.`,
+          });
+        } else {
+          throw err;
+        }
+      }
       onUpdate();
     }
     // Returned rather than acted on: a session cannot create a sibling, and
@@ -378,11 +435,19 @@ export class Session {
    * turn in flight owns `entries` and `messages` and adopting over it would
    * drop the output it has not persisted yet.
    */
-  adopt(rec: SessionRecord): void {
+  /**
+   * Take a record read from disk as this session's state.
+   *
+   * `mtimeMs` re-baselines the staleness check: without it the adopted copy
+   * would be written back with the *old* expectation and fail immediately,
+   * which is the opposite of what adopting a fresher copy is for.
+   */
+  adopt(rec: SessionRecord, mtimeMs?: number | null): void {
     this.title = rec.title;
     this.entries = rec.entries;
     this.updatedAt = rec.updatedAt;
     this.agent.messages = rec.messages;
+    if (mtimeMs !== undefined) this.loadedMtime = mtimeMs;
   }
 
   toRecord(): SessionRecord {
@@ -406,7 +471,19 @@ export class Session {
     const trimmed = title.trim();
     this.title = trimmed || DEFAULT_TITLE;
     this.updatedAt = Date.now();
-    await this.persist();
+    try {
+      await this.persist();
+    } catch (err) {
+      // The reload replaced this session with the disk copy, so the new name
+      // did not survive. Say so rather than leaving the rename looking applied.
+      if (err instanceof SessionReloadedError) {
+        throw new Error(
+          `${err.message}. The rename was not saved -- the name on disk is now ` +
+            `${JSON.stringify(this.title)}.`
+        );
+      }
+      throw err;
+    }
   }
 
   async persist(): Promise<void> {
@@ -428,8 +505,31 @@ export class Session {
       !this.seeded
     )
       return;
-    await save(this.toRecord());
+    try {
+      await save(this.toRecord(), this.loadedMtime);
+    } catch (err) {
+      if (!(err instanceof SessionChangedOnDiskError)) throw err;
+      // Somebody else wrote this session while this copy sat in memory. Do not
+      // overwrite them: reload what is on disk, note that this copy was
+      // replaced, and let the caller tell the user. Before this check the write
+      // went ahead, so an external repair -- or another terminal's work -- was
+      // silently discarded.
+      const found = await loadAllWithMtime().then(
+        (recs) => recs.find((r) => r.record.id === this.id) ?? null,
+        () => null
+      );
+      if (!found) {
+        // Deleted underneath us. Forget the file existed so the next write
+        // recreates it rather than failing forever.
+        this.loadedMtime = undefined;
+        throw new SessionChangedOnDiskError(this.id, null, null);
+      }
+      const newer = found.record.updatedAt > this.updatedAt;
+      this.adopt(found.record, found.mtimeMs);
+      throw new SessionReloadedError(this.id, newer);
+    }
     this.persisted = true;
+    this.loadedMtime = await mtimeOfSession(this.id);
   }
 
   async delete(): Promise<void> {

@@ -215,7 +215,22 @@ function repairTruncatedToolCalls(
 }
 
 /** Load all sessions, newest first. Skips corrupt files. */
+/**
+ * Every session on disk, newest first, with the `mtimeMs` each was read at.
+ *
+ * The mtime is returned rather than left for the caller to stat separately:
+ * between a `stat` and a `read` the file can change, and a mismatch there would
+ * make the next save either fail spuriously or overwrite a change that arrived
+ * in between. Both are taken here, from the same file.
+ */
 export async function loadAll(): Promise<SessionRecord[]> {
+  return (await loadAllWithMtime()).map((r) => r.record);
+}
+
+/** As `loadAll`, but keeping the mtime each record was read at. */
+export async function loadAllWithMtime(): Promise<
+  Array<{ record: SessionRecord; mtimeMs: number | null }>
+> {
   await ensureDir();
   let names: string[];
   try {
@@ -223,11 +238,12 @@ export async function loadAll(): Promise<SessionRecord[]> {
   } catch {
     return [];
   }
-  const records: SessionRecord[] = [];
+  const records: Array<{ record: SessionRecord; mtimeMs: number | null }> = [];
   for (const name of names) {
     if (!name.endsWith(".json")) continue;
     try {
-      const raw = await fs.readFile(path.join(SESSIONS_DIR, name), "utf8");
+      const file = path.join(SESSIONS_DIR, name);
+      const [raw, mtimeMs] = await Promise.all([fs.readFile(file, "utf8"), mtimeOf(file)]);
       const parsed = JSON.parse(raw);
       if (isRecord(parsed)) {
         // Screenshots are left as the `[image: <path>]` placeholders the save
@@ -237,14 +253,56 @@ export async function loadAll(): Promise<SessionRecord[]> {
         // clear it, because the image came straight back out of the file. The
         // model can ask for one with `view_image` when it actually needs it.
         parsed.messages = repairMalformedToolCalls(parsed.messages);
-        records.push(parsed);
+        records.push({ record: parsed, mtimeMs });
       }
     } catch {
       // ignore corrupt / partially written session files
     }
   }
-  records.sort((a, b) => b.updatedAt - a.updatedAt);
+  records.sort((a, b) => b.record.updatedAt - a.record.updatedAt);
   return records;
+}
+
+/**
+ * A save that would have discarded a change written by somebody else.
+ *
+ * `save` writes the whole record from memory, so without a check the last
+ * writer wins outright -- including a process that loaded the file hours ago
+ * and has not noticed an external repair, another terminal, or a script.
+ * Throwing instead lets the caller reload and decide, rather than silently
+ * losing whatever the other writer put there.
+ */
+export class SessionChangedOnDiskError extends Error {
+  constructor(
+    readonly id: string,
+    readonly expectedMtime: number | null,
+    readonly actualMtime: number | null
+  ) {
+    super(
+      `session ${id} changed on disk since it was loaded` +
+        (actualMtime === null ? " (it was deleted)" : "")
+    );
+    this.name = "SessionChangedOnDiskError";
+  }
+}
+
+/**
+ * Current `mtimeMs` of a session's file, or null if there is no file.
+ *
+ * Exported so a caller that has just written a session can record the new
+ * baseline without reading the whole record back.
+ */
+export function mtimeOfSession(id: string): Promise<number | null> {
+  return mtimeOf(path.join(SESSIONS_DIR, `${id}.json`));
+}
+
+/** Current `mtimeMs` of a session file, or null if there is no file. */
+async function mtimeOf(file: string): Promise<number | null> {
+  try {
+    return (await fs.stat(file)).mtimeMs;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -253,10 +311,29 @@ export async function loadAll(): Promise<SessionRecord[]> {
  * Image parts are replaced with a `[image: path]` placeholder first. Keeping
  * the base64 would put ~1.4 MB of text in the file for every 1 MB screenshot,
  * and the bytes are re-read from disk when the session is loaded.
+ *
+ * `expectedMtime` is the `mtimeMs` the caller loaded (null for "there was no
+ * file"). When given, the write is refused if the file has moved on since --
+ * that is what stops a process holding a stale copy from silently discarding
+ * an external repair. Omit it only where the caller genuinely owns the file:
+ * a brand-new session, or a deliberate overwrite.
+ *
+ * The comparison and the rename are not atomic together, so two writers racing
+ * within the same instant can still interleave. That is a far narrower window
+ * than "any two writers, any time apart", which is the case that lost data.
  */
-export async function save(rec: SessionRecord): Promise<void> {
+export async function save(
+  rec: SessionRecord,
+  expectedMtime?: number | null
+): Promise<void> {
   await ensureDir();
   const file = path.join(SESSIONS_DIR, `${rec.id}.json`);
+  if (expectedMtime !== undefined) {
+    const actual = await mtimeOf(file);
+    if (actual !== expectedMtime) {
+      throw new SessionChangedOnDiskError(rec.id, expectedMtime, actual);
+    }
+  }
   const tmp = file + ".tmp";
   const stored = {
     ...rec,
