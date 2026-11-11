@@ -12,7 +12,7 @@
  */
 import { strict as assert } from "node:assert";
 import { isValidJson } from "../src/agent.js";
-import { repairMalformedToolCalls } from "../src/store.js";
+import { ORPHANED_TOOL_RESULT, repairMalformedToolCalls } from "../src/store.js";
 
 // --- isValidJson ----------------------------------------------------------
 
@@ -113,4 +113,96 @@ const user = { role: "user", content: "write the plan" };
   assert.deepEqual(out.map((m: any) => m.role), ["system", "user", "assistant", "tool"]);
 }
 
-console.log("repair: truncated tool calls cannot strand a session");
+// --- unanswered tool calls ------------------------------------------------
+
+/**
+ * A call whose result never arrived (the process died while the tool ran) makes
+ * every later request fail with a 400. It is *well-formed* -- its arguments are
+ * valid JSON -- so the truncation check above does not see it, and restarting
+ * cannot clear it because the fault is in the file. It must be answered, not
+ * dropped: the model should know the call did not return.
+ */
+{
+  const call = {
+    role: "assistant",
+    content: null,
+    tool_calls: [
+      { id: "call_dead", type: "function", function: { name: "bash", arguments: '{"command":"sleep 30"}' } },
+    ],
+  };
+  const retry = { role: "user", content: "ok, let's get back to work" };
+
+  const out = repairMalformedToolCalls([system, user, call, retry] as any) as any[];
+  assert.deepEqual(
+    out.map((m) => m.role),
+    ["system", "user", "assistant", "tool", "user"],
+    "the missing reply is inserted directly after the call, before the user message"
+  );
+  assert.equal(out[3].tool_call_id, "call_dead", "the stub answers the orphaned call");
+  assert.equal(out[3].content, ORPHANED_TOOL_RESULT);
+  assert.equal(out[4].content, "ok, let's get back to work", "the user message is preserved");
+  assert.ok(out[2].tool_calls, "the call itself is kept, not dropped");
+}
+
+// Nothing answered at all, and the call is the last message.
+{
+  const call = {
+    role: "assistant",
+    content: null,
+    tool_calls: [{ id: "call_end", type: "function", function: { name: "bash", arguments: "{}" } }],
+  };
+  const out = repairMalformedToolCalls([system, user, call] as any) as any[];
+  assert.deepEqual(out.map((m) => m.role), ["system", "user", "assistant", "tool"]);
+  assert.equal(out[3].tool_call_id, "call_end");
+}
+
+// Two calls in one turn, only one answered: the other gets a stub, the real
+// reply is left exactly where it was.
+{
+  const two = {
+    role: "assistant",
+    content: null,
+    tool_calls: [
+      { id: "call_a", type: "function", function: { name: "bash", arguments: "{}" } },
+      { id: "call_b", type: "function", function: { name: "bash", arguments: "{}" } },
+    ],
+  };
+  const replyA = { role: "tool", tool_call_id: "call_a", content: "ran a" };
+  const out = repairMalformedToolCalls([system, user, two, replyA] as any) as any[];
+  assert.deepEqual(out.map((m) => m.role), ["system", "user", "assistant", "tool", "tool"]);
+  assert.equal(out[3], replyA, "the real reply is untouched");
+  assert.equal(out[4].tool_call_id, "call_b", "only the unanswered call gets a stub");
+}
+
+// A history where both faults occur at once: the truncated call is dropped with
+// its reply, and the surviving call is answered.
+{
+  const mixed = {
+    role: "assistant",
+    content: "Two calls.",
+    tool_calls: [
+      { id: "call_trunc", type: "function", function: { name: "write_file", arguments: '{"path":"/p"' } },
+      { id: "call_lost", type: "function", function: { name: "bash", arguments: "{}" } },
+    ],
+  };
+  const out = repairMalformedToolCalls([system, user, mixed] as any) as any[];
+  assert.deepEqual(out.map((m) => m.role), ["system", "user", "assistant", "tool"]);
+  assert.equal(out[2].tool_calls.length, 1);
+  assert.equal(out[2].tool_calls[0].id, "call_lost");
+  assert.equal(out[3].tool_call_id, "call_lost", "the orphaned survivor is answered");
+}
+
+// Repairing twice is a no-op: the stub it adds is itself a valid reply, so a
+// session that is saved and reloaded does not accumulate stubs.
+{
+  const call = {
+    role: "assistant",
+    content: null,
+    tool_calls: [{ id: "call_once", type: "function", function: { name: "bash", arguments: "{}" } }],
+  };
+  const once = repairMalformedToolCalls([system, user, call] as any);
+  const twice = repairMalformedToolCalls(once);
+  assert.equal(twice, once, "a repaired history is returned as-is on the next load");
+}
+
+console.log("repair: truncated and unanswered tool calls cannot strand a session");
