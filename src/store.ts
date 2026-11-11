@@ -34,7 +34,7 @@ export interface Entry {
   ok?: boolean;
 }
 
-/** Serialized form of a session on disk. */
+/** Serialised form of a session on disk. */
 export interface SessionRecord {
   id: string;
   title: string;
@@ -76,23 +76,105 @@ export function newId(): string {
 }
 
 /**
- * Remove tool calls whose `arguments` were truncated, and the replies to them.
+ * Make a loaded history one a provider will accept, without losing what the
+ * session actually did.
  *
- * A call cut off at the output-token cap holds invalid JSON, and providers
- * validate every call in the history on every request -- one of them makes each
- * later send fail with a bare "400 invalid argument", so the session is stranded
- * and cannot be recovered through the UI. New turns are checked before they are
- * committed (see `Agent.send`); this repairs histories written before that
- * check existed, and any damaged by another client.
+ * Providers validate the whole history on every request, so one bad turn makes
+ * every later send fail with a bare 400 -- and restarting cannot help, because
+ * the fault is in the file. A session is then stranded with no way back through
+ * the UI. Two faults are possible, both from a process that died mid-turn:
  *
- * The assistant's prose is kept even when its calls go: it may be the only
- * record of what the model said. A turn left with neither text nor calls is
- * dropped rather than sent as an empty message.
+ *  - **A call whose `arguments` were truncated** at the output-token cap. It
+ *    holds invalid JSON, so it is removed along with its reply
+ *    (`repairTruncatedToolCalls`).
+ *  - **A call that never got its reply**, because the process was killed
+ *    between issuing it and receiving the result. The call itself is
+ *    well-formed, so it is *answered* with a stub rather than dropped
+ *    (`answerOrphanedToolCalls`) -- dropping it would rewrite what the model
+ *    did, while a stub tells it plainly that the call never returned.
  *
- * Returns the same array when nothing is wrong, so a healthy history is not
- * needlessly copied on every load.
+ * The truncated pass runs first: a call it removes must not then be answered.
+ * Each pass returns the same array when its fault is absent, so a healthy
+ * history is not needlessly copied on every load and repairing twice is a
+ * no-op.
  */
 export function repairMalformedToolCalls(
+  messages: ChatCompletionMessageParam[]
+): ChatCompletionMessageParam[] {
+  return answerOrphanedToolCalls(repairTruncatedToolCalls(messages));
+}
+
+/** Content of the synthetic reply given to a call whose result never arrived. */
+export const ORPHANED_TOOL_RESULT =
+  "(interrupted: the process ended before this tool returned, so there is no output)";
+
+/**
+ * Give a reply to every tool call that never got one.
+ *
+ * A process killed between issuing a call and receiving its result leaves the
+ * call in the history with no reply after it. Providers reject the whole
+ * history then -- "an assistant message with 'tool_calls' must be followed by
+ * tool messages responding to each 'tool_call_id'" -- so every later send in
+ * that session fails with a 400, and restarting cannot help: the fault is in
+ * the file, and each retry appends another user message behind the dead call.
+ *
+ * Unlike a truncated call, this one is perfectly well-formed; only its result
+ * is missing. So it is answered rather than dropped. Dropping it would silently
+ * edit the model's account of what it did -- it would look as though it never
+ * made the call -- whereas a stub tells it plainly that the call never returned.
+ *
+ * A `tool` reply must sit immediately after the turn that issued the calls, so
+ * the stub is inserted there. Any non-tool message that had been appended in
+ * the meantime (a user message from a retry) follows it.
+ *
+ * Returns the same array when nothing is wrong.
+ */
+function answerOrphanedToolCalls(
+  messages: ChatCompletionMessageParam[]
+): ChatCompletionMessageParam[] {
+  let changed = false;
+  const out: ChatCompletionMessageParam[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i] as any;
+    out.push(m);
+    if (m?.role !== "assistant" || !Array.isArray(m.tool_calls) || !m.tool_calls.length) {
+      continue;
+    }
+
+    // The replies that did arrive: everything after this turn that is still a
+    // `tool` message. A reply cannot be separated from its call by any other
+    // role, so the run ends at the first one that is not `tool`.
+    const answered = new Set<string>();
+    let j = i + 1;
+    for (; j < messages.length; j++) {
+      const r = messages[j] as any;
+      if (r?.role !== "tool") break;
+      answered.add(r.tool_call_id);
+    }
+
+    let missing = m.tool_calls.filter((c: any) => c?.id && !answered.has(c.id));
+    if (!missing.length) continue;
+    changed = true;
+
+    // The stubs go after the replies that did arrive, so the run of `tool`
+    // messages stays contiguous and in the order the calls were made. Copying
+    // the real replies first and then appending keeps that property; any
+    // non-tool message that followed the run comes after them, untouched.
+    for (let k = i + 1; k < j; k++) out.push(messages[k]);
+    for (const c of missing) {
+      out.push({ role: "tool", tool_call_id: c.id, content: ORPHANED_TOOL_RESULT } as any);
+    }
+    i = j - 1; // the run has been emitted; continue after it
+  }
+
+  return changed ? out : messages;
+}
+
+/**
+ * Remove tool calls whose `arguments` were truncated, and the replies to them.
+ */
+function repairTruncatedToolCalls(
   messages: ChatCompletionMessageParam[]
 ): ChatCompletionMessageParam[] {
   const isBad = (m: any) =>
