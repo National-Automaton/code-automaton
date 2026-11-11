@@ -25,6 +25,64 @@ import {
  */
 const MAX_INTERRUPTIONS = 3;
 
+/**
+ * A request the provider refused before the turn began, so nothing of it
+ * happened.
+ *
+ * The distinction matters to the caller: a turn that dies *after* being
+ * accepted leaves a user message worth keeping in the history, but one that was
+ * never accepted leaves nothing, and keeping its message is actively harmful --
+ * it appends to the very history that was rejected, so every retry makes the
+ * session worse (see #66).
+ *
+ * Tagged rather than sniffed from the message text, because the caller must not
+ * have to parse provider prose to decide whether to write to a session file.
+ */
+export class RequestRejectedError extends Error {
+  constructor(
+    readonly status: number | undefined,
+    message: string,
+    /** True when the provider rejected the request itself, not its content. */
+    readonly malformedHistory: boolean
+  ) {
+    super(message);
+    this.name = "RequestRejectedError";
+  }
+}
+
+/**
+ * Whether a failed request left no trace of a turn.
+ *
+ * A request rejected with a 4xx before any stream event means the provider
+ * never ran it: no reply was lost, because none was started. Transient
+ * statuses (429, 500, 503) are excluded even though they are 4xx/5xx -- those
+ * are upstream failures the retry helper already handles, and the turn is
+ * genuinely in doubt rather than plainly refused.
+ */
+export function isRequestRejection(err: any): boolean {
+  if (err instanceof RequestRejectedError) return true;
+  const status = err?.status ?? err?.response?.status;
+  if (typeof status !== "number") return false;
+  if (status === 429 || status === 500 || status === 503) return false;
+  return status >= 400 && status < 500;
+}
+
+/**
+ * Whether a provider's rejection says the *history* is unusable.
+ *
+ * These are the ones where re-sending the same conversation can never work, so
+ * adding to it is pointless and the user needs to be told the session is
+ * damaged rather than left to retry into a growing file.
+ */
+export function isMalformedHistoryError(err: any): boolean {
+  const msg = String(err?.message ?? "");
+  return (
+    /tool_call_id/i.test(msg) ||
+    /tool_calls.*must be followed/i.test(msg) ||
+    /insufficient tool messages/i.test(msg)
+  );
+}
+
 export const SYSTEM_PROMPT = `You are a coding assistant running in a terminal.
 You can read, write, and edit files, list directories, and run shell commands.
 Prefer small, focused edits. Explain briefly what you are doing before using tools.
@@ -127,7 +185,7 @@ const COMPACT_KEEP_FRACTION = 0.2;
 /**
  * Split `messages` at a turn boundary near `splitAt`.
  *
- * Returns the messages that would be summarized and the ones kept verbatim.
+ * Returns the messages that would be summarised and the ones kept verbatim.
  * The system prompt (index 0) always stays. The split never lands between an
  * `assistant` turn carrying tool_calls and its `tool` results, because most
  * providers reject an orphaned `tool` message outright.
@@ -155,11 +213,11 @@ export function splitForCompaction(
  * user-role message rather than a fake tool result or a second system message:
  * several OpenAI-compatible backends reject those shapes mid-array.
  *
- * `summarize` is injected so this can be tested without a model call.
+ * `summarise` is injected so this can be tested without a model call.
  */
 export async function compactHistory(
   messages: ChatCompletionMessageParam[],
-  summarize: (older: ChatCompletionMessageParam[]) => Promise<string>,
+  summarise: (older: ChatCompletionMessageParam[]) => Promise<string>,
   maxChars = MAX_CONTEXT_CHARS,
   compactAt = DEFAULT_COMPACT_AT
 ): Promise<ChatCompletionMessageParam[]> {
@@ -183,7 +241,7 @@ export async function compactHistory(
 
   let summary: string;
   try {
-    summary = (await summarize(older)).trim();
+    summary = (await summarise(older)).trim();
   } catch {
     // A failed summary must not break the turn: fall back to the plain trim,
     // which is the existing behaviour and still prevents overflow.
@@ -817,7 +875,7 @@ export class Agent {
   }
 
   /**
-   * Summarize the older part of a history that is about to be compacted.
+   * Summarise the older part of a history that is about to be compacted.
    *
    * Deliberately non-streaming: the caller needs the whole string before it can
    * splice it in, and the reply is not user-visible work in progress. Uses the
@@ -825,7 +883,7 @@ export class Agent {
    * routing images through here would send them to the vision model for no
    * reason.
    */
-  private async summarize(older: ChatCompletionMessageParam[]): Promise<string> {
+  private async summarise(older: ChatCompletionMessageParam[]): Promise<string> {
     const transcript = older
       .map((m) => {
         const any = m as any;
@@ -869,6 +927,12 @@ export class Agent {
     emit: (ev: AgentEvent) => void,
     images: AttachedImage[] = []
   ): Promise<{ newSession?: { title?: string; preamble?: string } }> {
+    // Where the turn's own messages begin. If the provider refuses the request
+    // outright, everything from here on is rolled back: a turn that never ran
+    // must not leave a user message in the history, or every retry appends
+    // another one to a conversation the provider keeps rejecting.
+    const turnStart = this.messages.length;
+
     if (images.length) {
       // Image parts are only accepted in `user` messages; tool results cannot
       // carry them. Annotate each part with its path so the session store can
@@ -899,7 +963,7 @@ export class Agent {
         if (this.config.compact) {
           const before = this.messages.length;
           this.messages = await compactHistory(this.messages, (older) =>
-            this.summarize(older)
+            this.summarise(older)
           );
           if (this.messages.length < before) {
             emit({
@@ -1081,6 +1145,20 @@ export class Agent {
         // single tool call -- the agent would run one command, stop, and go
         // idle, and the user would have to prompt it again for each step.
       }
+    } catch (err) {
+      // The provider refused the request before any of it ran, so the turn
+      // never happened. Drop everything it appended -- the user message and
+      // any steer folded in while waiting -- and leave the history exactly as
+      // it was, so a retry is a retry rather than another permanent message in
+      // a conversation that keeps failing.
+      //
+      // Without this a session whose history the provider rejects grows by one
+      // message per attempt, which both hides the real fault and makes the
+      // file steadily further from a state that could ever be accepted.
+      if (isRequestRejection(err)) {
+        this.messages.length = turnStart;
+      }
+      throw err;
     } finally {
       // A turn is over however it ended -- finished, threw, or was abandoned
       // part-way through a tool batch -- so the live count must never stay
@@ -1120,7 +1198,20 @@ export class Agent {
       } catch (err: any) {
         const status = err?.status ?? err?.response?.status;
         const transient = status === 503 || status === 429 || status === 500;
-        if (!transient || attempt >= attempts) throw err;
+        if (!transient || attempt >= attempts) {
+          // A refusal here happened before the first chunk, so no part of the
+          // turn ran. Tag it so the caller can drop the user message instead of
+          // persisting it -- appending to a history the provider has already
+          // rejected is what made a damaged session grow on every retry.
+          if (!transient && typeof status === "number" && status >= 400 && status < 500) {
+            throw new RequestRejectedError(
+              status,
+              String(err?.message ?? err),
+              isMalformedHistoryError(err)
+            );
+          }
+          throw err;
+        }
         const waitMs = 500 * 2 ** (attempt - 1);
         emit({
           type: "text",

@@ -1,4 +1,9 @@
-import { Agent, AgentEvent } from "./agent.js";
+import {
+  Agent,
+  AgentEvent,
+  isMalformedHistoryError,
+  isRequestRejection,
+} from "./agent.js";
 import type { AttachedImage } from "./image.js";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { Config } from "./config.js";
@@ -329,9 +334,24 @@ export class Session {
     try {
       ({ newSession } = await this.agent.send(input, emit, images));
     } catch (err: any) {
+      // The provider refused the request, so the turn never ran: undo the
+      // transcript row for this message as well as the history entry. Leaving
+      // it would show a message the agent never saw -- and set the session
+      // title from it -- while the history no longer contains it.
+      if (isRequestRejection(err)) {
+        this.entries.pop();
+        if (this.title === deriveTitle([{ role: "user", content: input }])) {
+          this.title = DEFAULT_TITLE;
+        }
+      }
       this.entries.push({
         role: "assistant",
-        text: `error: ${err?.message ?? String(err)}`,
+        text: isMalformedHistoryError(err)
+          ? `error: ${err?.message ?? String(err)}\n\n` +
+            `This session's history is malformed, so every request will fail ` +
+            `until it is repaired. Nothing was added to it. Report this — the ` +
+            `history needs repair, not another attempt.`
+          : `error: ${err?.message ?? String(err)}`,
       });
     } finally {
       this.status = "idle";
