@@ -59,6 +59,21 @@ function readVersion(): string {
 }
 
 /**
+ * How a session's turn state reads in the picker.
+ *
+ * Three states, and the third is the point: a session whose process died
+ * mid-turn reports `recovered` rather than idle, because "idle" would imply it
+ * finished and "thinking" would imply something is still running. Neither is
+ * true, and the user needs to be able to tell the difference before deciding
+ * whether to open it.
+ */
+function statusWord(s: Session): string {
+  if (s.status === "thinking") return "● thinking";
+  if (s.recovered) return "recovered";
+  return "idle";
+}
+
+/**
  * Owns the whole TUI: the list of live sessions, which one is active, and the
  * picker overlay. Left-arrow (or Ctrl+R) opens the picker without leaving the
  * running app, so several sessions stay live at once.
@@ -294,7 +309,7 @@ export class App {
     const items: PickerItem[] = pickerList.map((s) => ({
       label: s.title,
       detail:
-        `${s.entries.length} msgs · ${s.status === "thinking" ? "● thinking" : "idle"} · ` +
+        `${s.entries.length} msgs · ${statusWord(s)} · ` +
         new Date(s.updatedAt).toLocaleString(),
       // A session this terminal already holds is openable, so only report a
       // lock held by somebody else.
@@ -1375,8 +1390,14 @@ export class App {
   private closeSession(session: Session, fromPicker = false): boolean {
     if (session.status === "thinking") {
       // A running turn owns the transcript and persists on completion, so the
-      // session cannot be deleted from under it.
-      if (fromPicker) this.pickerNote("that session is mid-turn -- wait for it to finish, or Ctrl+C to quit");
+      // session cannot be deleted from under it. `status` is live UI state, so
+      // this only ever refuses a turn running *in this process* -- a session
+      // whose process died mid-turn loads as idle and is marked `recovered`,
+      // which is deletable below.
+      if (fromPicker)
+        this.pickerNote(
+          "that session is mid-turn here -- wait for it to finish, or Ctrl+C to quit"
+        );
       return false;
     }
     const idx = this.sessions.indexOf(session);
@@ -1841,6 +1862,10 @@ export class App {
     const kept = this.sessions.filter(
       (s) => onDisk.has(s.id) || s.status === "thinking" || !s.persisted
     );
+    // A recovered session is idle and has no owner, so nothing will ever write
+    // it again. If its file is gone it was deleted elsewhere -- perhaps from
+    // another terminal's picker, which is now possible for exactly these rows
+    // -- and holding it here would leave a row that can never be removed.
     const removedCount = this.sessions.length - kept.length;
     if (removedCount > 0) {
       // Sessions dropped here were deleted in another terminal, so they are no
@@ -1972,6 +1997,9 @@ export class App {
       // A turn is running: hand the text to it rather than dropping it. It
       // rides along with the next request the agent sends, which for a turn
       // running tools is only moments away.
+      //
+      // A `recovered` session never reaches here: its turn ended with the
+      // process that owned it, so it loads as idle and starts a fresh turn.
       session.steer(text);
       this.input.clear();
       this.recall.reset();
