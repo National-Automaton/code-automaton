@@ -94,6 +94,15 @@ export class App {
     help: string[] | null;
     /** First help line drawn; the block scrolls while it is open. */
     helpTop: number;
+    /**
+     * What the picker last refused, or null. Shown in place of the hint.
+     *
+     * The transcript is not drawn while the picker is open, so a note written
+     * only there is invisible -- which is how Ctrl+X on a mid-turn session came
+     * to look like a dead key. Cleared on the next keypress that does something
+     * on purpose, so it does not outlive the mistake it describes.
+     */
+    notice: string | null;
   } | null = null;
   /**
    * Title editor, non-null while a session's title is being edited (Alt+R).
@@ -333,6 +342,7 @@ export class App {
             renaming: !!(this.rename && this.rename.fromPicker),
             help: this.picker.help,
             helpTop: this.picker.helpTop,
+            notice: this.picker.notice,
           }
         : null,
       rename:
@@ -936,10 +946,15 @@ export class App {
     });
   }
 
-  private onPickerKey(k: Key): void {    const p = this.picker!;
+  private onPickerKey(k: Key): void {
+    const p = this.picker!;
     const items = this.pickerSessions();
     const n = items.length;
     const q = p.query;
+    // Whatever the picker last refused is about to be replaced by what this
+    // keypress does. Only a refusal sets it again, so the note lives exactly as
+    // long as it describes the state of the list.
+    p.notice = null;
 
     switch (k.type) {
       // Clamp at the ends rather than wrapping. Wrapping from the last row to
@@ -1051,7 +1066,13 @@ export class App {
           this.picker = null;
           void this.openSession(target).then((opened) => {
             if (!opened) {
-              this.picker = { index: p.index, query: p.query, help: p.help, helpTop: p.helpTop };
+              this.picker = {
+                index: p.index,
+                query: p.query,
+                help: p.help,
+                helpTop: p.helpTop,
+                notice: p.notice,
+              };
               this.requestRender();
             }
           });
@@ -1109,12 +1130,28 @@ export class App {
         else if (k.ch === "k") { q.deleteToEnd(); this.clampPickerIndex(); this.requestRender(); }
         else if (k.ch === "w") { q.deleteWordLeft(); this.clampPickerIndex(); this.requestRender(); }
         else if (k.ch === "x") {
-          // Delete the highlighted session, not the active one. closeSession()
-          // already refuses to kill a turn that is still running, so this is a
-          // no-op on a "thinking" row rather than an error. Pass fromPicker so
-          // the highlight follows the row that shifts into the deleted slot.
+          // Delete the highlighted session, not the active one, and leave the
+          // terminal's own session -- and its lock -- exactly as they are:
+          // deleting a row is not opening one. A row that is mid-turn, or one
+          // this terminal already holds, is refused with a note in the hint
+          // row, because the transcript is not drawn while the picker is up.
+          //
+          // A row locked by *another* coda is deleted: its lock is that
+          // terminal's to lose, and the row already says Enter will not open
+          // it. Refusing there too would make Ctrl+X look broken in exactly the
+          // place the hint advertises it.
           if (n > 0) {
-            this.closeSession(items[p.index], true);
+            const target = items[p.index];
+            if (!target) {
+              this.pickerNote("that session is no longer in the list");
+              this.clampPickerIndex();
+            } else if (target.lockHeld) {
+              this.pickerNote(
+                `${target.title} is open here -- press Enter to switch to it, then Ctrl+X`
+              );
+            } else {
+              this.closeSession(target, true);
+            }
             this.requestRender();
           }
         }
@@ -1310,17 +1347,52 @@ export class App {
   /**
    * Delete a session by reference, keeping indices valid.
    *
-   * `fromPicker` tells the clamp that the picker list just shrank, so the
-   * highlight should follow the row that moved into the deleted one's place
-   * rather than staying on the same numeric index.
+   * `fromPicker` marks a delete that came from the picker's Ctrl+X, as opposed
+   * to closing the session this terminal is working in (Ctrl+X in the chat
+   * view). The two differ in three ways, and each of them was a bug when the
+   * picker reused the close path unchanged:
+   *
+   *  - **The active session is left alone.** Closing the active session has to
+   *    move somewhere, so `closeSession` picks a replacement and takes its lock.
+   *    From the picker that meant one keypress quietly switched the session you
+   *    were working in *and* locked a session you had not opened, denying it to
+   *    another terminal -- which then showed "open in pid N" in its own picker.
+   *    Deleting a row is not opening a session, so nothing here becomes active.
+   *  - **Nothing is silently ignored.** A delete in the picker applies to the
+   *    highlighted row, which may well be a turn still running; that used to
+   *    fall out of the `thinking` guard with no word at all, so Ctrl+X looked
+   *    like a dead key. The picker path now answers with a note either way and
+   *    returns whether it deleted.
+   *  - **The list is never emptied past a placeholder.** Only the picker path
+   *    replaces the last session with a fresh one, and only when the deleted
+   *    one left nothing else behind; otherwise the caller prunes placeholders
+   *    as usual.
+   *
+   * The highlight is re-clamped rather than shifted back: a shrink that leaves
+   * the index past the end means the last row went, and clamping lands on the
+   * row that took its place -- which is where the eye already is.
    */
-  private closeSession(session: Session, fromPicker = false): void {
-    if (session.status === "thinking") return; // don't kill a running turn
+  private closeSession(session: Session, fromPicker = false): boolean {
+    if (session.status === "thinking") {
+      // A running turn owns the transcript and persists on completion, so the
+      // session cannot be deleted from under it.
+      if (fromPicker) this.pickerNote("that session is mid-turn -- wait for it to finish, or Ctrl+C to quit");
+      return false;
+    }
     const idx = this.sessions.indexOf(session);
-    if (idx === -1) return;
+    if (idx === -1) return false;
     const wasActive = session.id === this.activeId;
     void session.delete(); // also releases its lock
     this.sessions.splice(idx, 1);
+    if (fromPicker) {
+      // Deleting the last row would leave the picker listing nothing. A fresh
+      // placeholder keeps the list valid without becoming active -- an empty
+      // session is no different from the one startup creates.
+      if (this.sessions.length === 0) this.sessions.push(new Session(this.config));
+      this.heldByOther.delete(session.id);
+      this.clampPickerIndex(true);
+      return true;
+    }
     if (this.sessions.length === 0) this.sessions.push(new Session(this.config));
     // Closing the session you were on makes another session active. Point the
     // id at it (the array has shrunk, so an index would be meaningless) and take
@@ -1329,7 +1401,8 @@ export class App {
       this.setActive(this.sessions[Math.min(idx, this.sessions.length - 1)]);
       this.claimActive();
     }
-    this.clampPickerIndex(fromPicker);
+    this.clampPickerIndex();
+    return true;
   }
 
   private onChatKey(k: Key): void {
@@ -1535,7 +1608,16 @@ export class App {
   }
 
   /** Append a local, informational line to the current transcript. */
-  private systemNote(text: string): void {
+  /**
+   * Say something in the transcript.
+   *
+   * `quiet` is for a note already showing in the picker's hint row (see
+   * `pickerNote`): it is written to the transcript so it is still there after
+   * Esc, but the view is left alone. Nothing else in this method moves the view
+   * -- a reader who has scrolled back is not dragged to the tail -- so the flag
+   * exists only to document that the picker case writes and does not disturb.
+   */
+  private systemNote(text: string, _quiet = false): void {
     // Redacted on the way in: a note is transcript text, it is saved to the
     // session file, and it is re-sent to the model as history. Scrubbing here
     // covers every note, including ones built from a command's output.
@@ -1544,6 +1626,21 @@ export class App {
     // into history, leave their offset alone: a note arriving (an attachment, a
     // status message) should not yank the transcript out from under them.
     this.requestRender();
+  }
+
+  /**
+   * Report something the picker just did, or refused to do.
+   *
+   * The transcript is not drawn while the picker is open -- that is what makes
+   * it full-screen -- so a note written only there is invisible at exactly the
+   * moment it matters. Ctrl+X on a session that is still mid-turn looked like a
+   * key that did nothing at all. The picker therefore carries its own message,
+   * drawn in the hint row, and the note goes to the transcript underneath as
+   * well so it is still there after Esc.
+   */
+  private pickerNote(text: string): void {
+    if (this.picker) this.picker.notice = text;
+    this.systemNote(text, true);
   }
 
   /**
@@ -1676,6 +1773,7 @@ export class App {
       query: new LineBuffer(),
       help: null,
       helpTop: 0,
+      notice: null,
     };
     // A reopened picker starts at the top of the list; the window otherwise
     // keeps wherever the last one was scrolled to.
