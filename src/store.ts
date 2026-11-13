@@ -43,6 +43,19 @@ export interface SessionRecord {
   updatedAt: number;
   messages: ChatCompletionMessageParam[];
   entries: Entry[];
+  /**
+   * True while a turn is in flight, so a load can tell "the process died
+   * mid-turn" from "this session was idle".
+   *
+   * Optional because every record written before this existed lacks it, and
+   * absent must mean idle rather than "unknown" -- an old session is not
+   * suspect merely for predating the field.
+   *
+   * This records the fact; it does not by itself grant recovery. A record that
+   * loads with `turnOpen` true has no owner left to finish the turn, so the
+   * session is adopted as idle and marked `recovered` (see `Session`).
+   */
+  turnOpen?: boolean;
 }
 
 function isRecord(v: any): v is SessionRecord {

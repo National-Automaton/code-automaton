@@ -207,6 +207,12 @@ export class Session {
     this.title = rec?.title ?? DEFAULT_TITLE;
     this.persisted = rec !== undefined;
     this.loadedMtime = rec === undefined ? undefined : loadedMtime;
+    // A record whose turn was still open means the process that owned it is
+    // gone: nothing remains that could finish it. Load it as idle -- which it
+    // already is, since `status` defaults to that -- and remember that it was
+    // cut short, so the UI can say so instead of showing a turn that is not
+    // running.
+    if (rec?.turnOpen) this.recovered = true;
     this.agent = new Agent(config, rec?.messages);
   }
 
@@ -334,6 +340,32 @@ export class Session {
     await this.persist();
   }
 
+  /**
+   * True while a turn is in flight, persisted so a later load can tell a dead
+   * turn from an idle session.
+   *
+   * Set when `run` starts and cleared in its `finally`, so a clean finish
+   * always writes it false. Only a process that dies mid-turn -- killed,
+   * crashed, terminal closed -- leaves it true on disk, which is exactly the
+   * case that used to be indistinguishable from a finished session.
+   *
+   * Deliberately *not* the same thing as `status`: that is live UI state and
+   * says "a turn is running right now, in this process". This says "a turn was
+   * running when this session was last written", which is a fact about the
+   * past and therefore safe to persist.
+   */
+  private turnOpen = false;
+
+  /**
+   * True when this session was loaded with its turn still open -- so the
+   * process that owned it is gone.
+   *
+   * Reported rather than acted on here: a recovered session is adopted as
+   * idle, because nothing remains that could finish the turn. What the UI does
+   * with it (allow opening and deleting, say why) is the app's call.
+   */
+  recovered = false;
+
   async run(
     input: string,
     onUpdate: () => void,
@@ -342,6 +374,15 @@ export class Session {
     askSecret?: (name: string, label: string, hidden: boolean) => Promise<string | null>
   ): Promise<{ newSession?: { title?: string; preamble?: string } }> {
     this.status = "thinking";
+    // Recorded before the first request so a kill at any point during the turn
+    // leaves evidence of it. Persisted immediately rather than waiting for the
+    // turn to end: the whole point is to survive the process not getting there.
+    this.turnOpen = true;
+    await this.persist().catch(() => {
+      // A session that cannot be written yet (a brand-new one, still empty)
+      // has nothing to record and nothing to lose. The flag is written with
+      // the first save that succeeds during the turn.
+    });
     // The approval prompt belongs to the UI, not to the agent: `Agent` has no
     // terminal. Installing it here means a turn started from the app can ask,
     // while a programmatic run (tests, tooling) simply cannot approve anything
@@ -394,6 +435,10 @@ export class Session {
       });
     } finally {
       this.status = "idle";
+      // Cleared before the write, so the record on disk says the turn is over.
+      // A throw between here and the write leaves it closed, which errs toward
+      // "this session is available" rather than locking the user out of it.
+      this.turnOpen = false;
       this.updatedAt = Date.now();
       try {
         await this.persist();
@@ -459,6 +504,9 @@ export class Session {
       updatedAt: this.updatedAt,
       messages: this.agent.messages,
       entries: this.entries,
+      // Written last so a crash between the two writes below leaves the
+      // *previous* turn's state rather than a half-applied one. See `turnOpen`.
+      ...(this.turnOpen ? { turnOpen: true } : {}),
     };
   }
 
