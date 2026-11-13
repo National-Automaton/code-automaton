@@ -8,6 +8,37 @@ import { containsSecret, getSecret, redact, trackSecret } from "./secrets.js";
 
 const execAsync = promisify(exec);
 
+/**
+ * Tools this process may use at all, or null for "no restriction" (the TUI).
+ *
+ * Set by a headless run (`--allow`). It is checked *here*, in `runTool`, as
+ * well as in the approval gate in `agent.ts`, because the two cover different
+ * holes: the gate sees `use_secret`, `request_secret` and `new_session`, while
+ * everything else -- `bash` above all -- goes straight from the gate to
+ * `runTool` without a name being considered. A policy that only lived in the
+ * gate would leave `bash` unattended.
+ *
+ * Exported as a setter rather than plumbed through every call site so that a
+ * tool added later is denied by default in headless runs without anyone having
+ * to remember to thread a parameter through to it.
+ */
+let allowedTools: Set<string> | null = null;
+
+/** Restrict which tools may run, or pass null to lift the restriction. */
+export function setToolPolicy(tools: Set<string> | null): void {
+  allowedTools = tools;
+}
+
+/**
+ * Thrown when a tool is outside the policy. Caught by the agent, not the user.
+ */
+export class ToolNotAllowed extends Error {
+  constructor(readonly tool: string) {
+    super(`${tool}: not permitted in this run`);
+    this.name = "ToolNotAllowed";
+  }
+}
+
 export const toolDefinitions: ChatCompletionTool[] = [
   {
     type: "function",
@@ -542,6 +573,17 @@ export function parallelBatch(calls: Array<{ name: string; args: any }>): number
 }
 
 export async function runTool(name: string, args: any): Promise<ToolResult> {
+  // The policy applies to every tool, not just the gated ones. See
+  // `setToolPolicy`: `bash` reaches this point without the approval gate ever
+  // naming it, so this is the check that keeps it out of an unattended run.
+  if (allowedTools && !allowedTools.has(name)) {
+    return {
+      ok: false,
+      output:
+        `${name}: refused. This run is restricted to: ` +
+        `${[...allowedTools].sort().join(", ") || "(no tools)"}.`,
+    };
+  }
   try {
     switch (name) {
       case "read_file": {

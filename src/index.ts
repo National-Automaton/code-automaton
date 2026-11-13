@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import { App } from "./app.js";
 import { SESSIONS_DIR } from "./store.js";
+import { parseHeadlessArgs } from "./headless-args.js";
+import { EXIT, runHeadless } from "./headless.js";
 
 /**
  * Read the version from package.json rather than hardcoding it, so `npm version`
@@ -27,11 +29,51 @@ const VERSION = (() => {
 const HELP = `Code Automaton — a terminal agentic coding tool with session recall.
 
 Usage:
-  coda [options]
+  coda [options]                 Open the interactive TUI.
+  coda -p "prompt" [options]     Run one prompt unattended and exit.
 
 Options:
   -h, --help      Show this help and exit.
   -v, --version   Print the version and exit.
+
+Headless mode (for cron, Task Scheduler, CI):
+  -p, --print     Run the prompt unattended, print the result, and exit. No
+                  terminal is needed. The exit code reports the outcome:
+                    0    success
+                    1    the turn failed (API error, no final answer)
+                    2    bad usage
+                    3    a tool was refused by policy (see --allow)
+                    124  the --timeout deadline passed
+  --session NAME  Use the session titled NAME, creating it if there is none,
+                  resuming the newest match otherwise.
+  --no-resume     Always start a fresh session, even if NAME already exists.
+                  Use this for a reproducible report: last week's errors do not
+                  ride along in the history.
+  --prompt-file F Read the prompt from F instead of the command line, for a
+                  multi-line standing prompt.
+  --report-path F Require F to be written by the run. If the model answered in
+                  prose instead, the answer is saved there; a file left over
+                  from an earlier run is a failure, not a success.
+  --allow TOOLS   Comma-separated tools this run may use: read_file, write_file,
+                  edit_file, list_dir, view_image, bash, new_session,
+                  request_secret, use_secret, or "all". Default:
+                  read_file,list_dir,view_image. Anything not listed is refused,
+                  including the credentials vault and new sessions.
+  --deny-ok       Treat a refused tool call as a failure. Off by default: the
+                  model may have worked around a refusal successfully.
+  --timeout D     Wall-clock limit for the turn, e.g. 30m, 90s, or 1800000ms.
+                  Default 30m.
+  --verbose       Stream the turn's text and tool calls to stderr.
+
+  A headless run never prompts and never approves anything it was not told to.
+  In particular write_file, edit_file, bash and use_secret are refused unless
+  named in --allow, so a scheduled job can read the web and write its report
+  without being able to touch the vault or spend a credential.
+
+  Example — a weekly research report, Windows Task Scheduler:
+    wsl.exe -d Ubuntu -- bash -lc 'cd ~/reports && coda -p --prompt-file prompt.md \\
+      --session weekly-report --no-resume --allow read_file,write_file,bash \\
+      --report-path "$(date +%F)-news.md" --timeout 45m'
 
 Keys:
   Enter           Send the current line. While a turn is running, Enter folds
@@ -115,8 +157,38 @@ function parseArgs(argv: string[]): { help: boolean; version: boolean } {
   return out;
 }
 
+/** Whether argv asks for a headless run, judged before anything else. */
+function wantsHeadless(argv: string[]): boolean {
+  return argv.some((a) => a === "-p" || a === "--print" || a.startsWith("--print="));
+}
+
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+
+  if (wantsHeadless(argv)) {
+    const parsed = parseHeadlessArgs(argv, (p) => fs.readFileSync(p, "utf8"));
+    if (parsed.help) {
+      console.log(HELP);
+      return;
+    }
+    if (parsed.version) {
+      console.log(`coda ${VERSION}`);
+      return;
+    }
+    if (parsed.error || parsed.missingPrompt || !parsed.options) {
+      console.error(`error: ${parsed.error ?? "headless mode needs a prompt"}`);
+      console.error(
+        'usage: coda -p "prompt" [--session NAME] [--no-resume] [--report-path FILE]\n' +
+          "                     [--allow TOOLS] [--timeout 30m] [--verbose]\n" +
+          "       coda -p --prompt-file FILE ...   (see coda --help)"
+      );
+      process.exit(EXIT.usage);
+    }
+    process.exitCode = await runHeadless(parsed.options);
+    return;
+  }
+
+  const args = parseArgs(argv);
   if (args.help) {
     console.log(HELP);
     return;
@@ -126,9 +198,12 @@ async function main() {
     return;
   }
 
+  // Headless runs need no terminal; the interactive TUI does. This check is
+  // therefore only reached when no `-p`/`--print` was given.
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.error("error: coda requires an interactive terminal (TTY).");
-    process.exit(1);
+    console.error('For an unattended run, pass a prompt: coda -p "what to do"');
+    process.exit(EXIT.usage);
   }
 
   const config = loadConfig();
