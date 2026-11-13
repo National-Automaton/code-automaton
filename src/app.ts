@@ -179,13 +179,13 @@ export class App {
   /**
    * The `/model` overlay, when open.
    *
-   * `catalog` is the fetched list plus which models accept images; `index` is
+   * `catalogue` is the fetched list plus which models accept images; `index` is
    * the highlighted chat model, and `visionIndex` the image model chosen with
    * Left/Right. The selection is only committed on Enter, so Esc leaves the
    * session's routing exactly as it was -- arrows move a draft, not the app.
    */
   private modelPicker: {
-    catalog: ModelCatalog;
+    catalogue: ModelCatalog;
     index: number;
     visionIndex: number;
   } | null = null;
@@ -370,11 +370,11 @@ export class App {
     // The image column offers models believed to accept images, plus the one
     // in force even when its name does not advertise it (it is configured, so
     // it is known to work).
-    const vision = m.catalog.chat.filter((c) => c.vision).map((c) => c.id);
+    const vision = m.catalogue.chat.filter((c) => c.vision).map((c) => c.id);
     const current = route.visionModel ? bareId(route.visionModel) : "";
     if (current && !vision.includes(current)) vision.push(current);
     return {
-      models: m.catalog.chat.map((c) => ({ id: c.id, vision: c.vision })),
+      models: m.catalogue.chat.map((c) => ({ id: c.id, vision: c.vision })),
       index: m.index,
       selected: bareId(route.textModel),
       vision,
@@ -384,7 +384,7 @@ export class App {
       // the cursor stuck on the model that was already active.
       visionIndex: Math.max(0, Math.min(m.visionIndex, vision.length - 1)),
       usingVision: route.usingVision,
-      notice: m.catalog.fetched ? "from model endpoint" : `config only: ${m.catalog.error ?? "not fetched"}`,
+      notice: m.catalogue.fetched ? "from model endpoint" : `config only: ${m.catalogue.error ?? "not fetched"}`,
     };
   }
 
@@ -551,7 +551,7 @@ export class App {
    */
   private onModelPickerKey(k: Key): void {
     const m = this.modelPicker!;
-    const models = m.catalog.chat;
+    const models = m.catalogue.chat;
     const vision = this.modelPickerState(m).vision;
 
     switch (k.type) {
@@ -619,20 +619,20 @@ export class App {
    * an offline machine can still see and reselect what it is running.
    */
   private async openModelPicker(): Promise<void> {
-    const catalog = await loadCatalog(this.config);
+    const catalogue = await loadCatalog(this.config);
     const route = this.current().route;
     const current = bareId(route.textModel);
-    const idx = Math.max(0, catalog.chat.findIndex((c) => c.id === current));
+    const idx = Math.max(0, catalogue.chat.findIndex((c) => c.id === current));
 
     // Start the image cursor on the model actually in force, resolved against
     // the same list the overlay will draw (which may append the configured
     // model when its name does not advertise image support).
-    const vision = catalog.chat.filter((c) => c.vision).map((c) => c.id);
+    const vision = catalogue.chat.filter((c) => c.vision).map((c) => c.id);
     const activeVision = route.visionModel ? bareId(route.visionModel) : "";
     if (activeVision && !vision.includes(activeVision)) vision.push(activeVision);
     const visionIndex = Math.max(0, vision.indexOf(activeVision));
 
-    this.modelPicker = { catalog, index: idx, visionIndex };
+    this.modelPicker = { catalogue, index: idx, visionIndex };
     this.screen.resetModelWindow();
     this.requestRender();
   }

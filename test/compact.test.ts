@@ -82,20 +82,20 @@ async function main() {
     log("threshold: below-threshold history is untouched");
   }
 
-  // 2. Above the threshold it summarizes, and the result is well formed.
+  // 2. Above the threshold it summarises, and the result is well formed.
   {
     const h = history(120, 400);
-    let summarized = 0;
+    let summarised = 0;
     const out = await compactHistory(
       h,
       async (older) => {
-        summarized = older.length;
+        summarised = older.length;
         return "the user asked for forty things";
       },
       50_000
     );
     assert.ok(out.length < h.length, "above threshold: history must shrink");
-    assert.ok(summarized > 0, "summarizer must receive the older messages");
+    assert.ok(summarised > 0, "summariser must receive the older messages");
     assert.equal(out[0].role, "system");
     assert.equal(out[1].role, "user");
     assert.match(String(out[1].content), /Summary of earlier work/);
@@ -112,7 +112,7 @@ async function main() {
       if (older.length === 0) continue;
       assert.equal(keep[0].role, "user", `cut ${cut}: kept tail must start at a user turn`);
       assert.equal(older[older.length - 1].role, "tool",
-        `cut ${cut}: summarized span should end on a completed turn`);
+        `cut ${cut}: summarised span should end on a completed turn`);
     }
     log("split: every cut point lands on a turn boundary");
   }
@@ -130,7 +130,7 @@ async function main() {
     const expected = trimHistory(h, 50_000);
     assert.deepEqual(out, expected, "failed summary must fall back to trimHistory");
     assertWellFormed(out, "fallback");
-    log("fallback: summarizer failure degrades to trimHistory, no throw");
+    log("fallback: summariser failure degrades to trimHistory, no throw");
   }
 
   // 5. An empty summary also falls back rather than splicing a blank message.
