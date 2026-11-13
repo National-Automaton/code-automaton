@@ -1,6 +1,6 @@
 /**
  * Minimal raw-mode key reader. Parses the ANSI escape sequences emitted for
- * arrow keys and a few control chords, and hands back a normalized Key.
+ * arrow keys and a few control chords, and hands back a normalised Key.
  *
  * Nothing in here renders; it only decodes stdin into intents.
  */

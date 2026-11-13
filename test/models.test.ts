@@ -1,5 +1,5 @@
 /**
- * The `/model` catalog: which models are offered, which one carries images, and
+ * The `/model` catalogue: which models are offered, which one carries images, and
  * what happens when the endpoint cannot be asked.
  *
  * The list is fetched from an OpenAI-compatible `GET /models`, so these tests

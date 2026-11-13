@@ -602,7 +602,7 @@ own is exempt and is sent as ordinary text (e.g. a pasted absolute path).
 | `CODA_MOUSE` | `on` — set to `off` to leave mouse selection to the terminal (see [Scrolling back](#scrolling-back)) |
 | `CODA_PARALLEL_TOOLS` | `on` — set to `off` to run tool calls strictly in the order the model requested them (see [Parallel tool calls](#parallel-tool-calls)) |
 | `CODA_MAX_CONTEXT_CHARS` | `3200000` — the history budget for one request (~800k tokens). Lower it for a model with a smaller context window |
-| `CODA_COMPACT` | `off` — set to `on` to summarize old turns once history reaches 75% of the budget, instead of letting the hard trim drop them (see [History compaction](#history-compaction)) |
+| `CODA_COMPACT` | `off` — set to `on` to summarise old turns once history reaches 75% of the budget, instead of letting the hard trim drop them (see [History compaction](#history-compaction)) |
 | `CODA_VISION_MODEL` | the value of `CODA_MODEL` |
 | `CODA_VISION_BASE_URL` | the value of `CODA_BASE_URL` |
 | `CODA_VISION_API_KEY` | the value of `CODA_API_KEY` |
@@ -643,7 +643,7 @@ git switch main && git pull --ff-only
 git push origin v$(node -p "require('./package.json').version")
 ```
 
-CI builds, checks the tag matches `package.json`, smoke-tests the artifact and
+CI builds, checks the tag matches `package.json`, smoke-tests the artefact and
 runs `npm stage publish --provenance`. It also creates a GitHub release.
 
 Then approve the staged version in the **npm web UI** (account → Staged
