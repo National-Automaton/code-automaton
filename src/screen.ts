@@ -168,6 +168,15 @@ export interface RenderState {
     help: string[] | null;
     /** First help line to draw: the block scrolls within its rows. */
     helpTop: number;
+    /**
+     * A refusal from the last action, shown in place of the hint -- or null.
+     *
+     * The transcript is not drawn at all while the picker is open, so a note
+     * written there is invisible: Ctrl+X on a session that was still mid-turn
+     * simply looked like a key that did nothing. This row is the only place a
+     * refusal can be seen before the overlay closes.
+     */
+    notice: string | null;
   } | null;
   /**
    * Set while a session's title is being edited from the chat view (Alt+R).
@@ -1128,6 +1137,13 @@ export class Screen {
         ? `   ·   ${lockedCount === 1 ? "1 session is" : `${lockedCount} sessions are`} ` +
           `open in another coda (wait ~30s)`
         : "";
+    // A refusal from the last action (Ctrl+X on a session that is mid-turn, a
+    // row that has gone) replaces the standing hint entirely: it is the answer
+    // to the key that was just pressed, and the hint would otherwise be the
+    // last thing on screen while nothing appeared to happen.
+    const refusal = p.notice ?? "";
+    const hintText = refusal ? refusal : hint;
+    const hintColour = refusal ? YELLOW : DIM;
     // The note gets what it needs first (it is the new information; the hint is
     // standing text), capped so the hint always keeps a readable stub. Without
     // the cap an 80-column terminal would spend the whole row on the note.
@@ -1135,8 +1151,8 @@ export class Screen {
     const noteRoom = lockNote ? Math.min(lockNote.length, Math.max(0, room - 24)) : 0;
     const hintRoom = Math.max(1, room - noteRoom);
     out.push(
-      DIM +
-        hint.slice(0, hintRoom) +
+      hintColour +
+        hintText.slice(0, hintRoom) +
         RESET +
         (noteRoom > 0 ? YELLOW + lockNote.slice(0, noteRoom) + RESET : "")
     );

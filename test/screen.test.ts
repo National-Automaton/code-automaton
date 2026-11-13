@@ -161,7 +161,7 @@ function chatState(input = "hi", cursor = 2, runningTools = 0, status = "idle", 
 function pickerState(index = 0, query = "abc", cursor = 3) {
   return {
     ...chatState(),
-    picker: { items, index, query, cursor, renaming: false, help: null, helpTop: 0 },
+    picker: { items, index, query, cursor, renaming: false, help: null, helpTop: 0, notice: null },
   };
 }
 
@@ -561,7 +561,16 @@ await (async () => {
     ];
     const frame = renderAt(size.cols, size.rows, screen, {
       ...chatState(),
-      picker: { items: lockedItems, index: 0, query: "", cursor: 0, renaming: false, help: null, helpTop: 0 },
+      picker: {
+        items: lockedItems,
+        index: 0,
+        query: "",
+        cursor: 0,
+        renaming: false,
+        help: null,
+        helpTop: 0,
+        notice: null,
+      },
     });
     const rows = frame.rows.map(strip);
     const heldRow = rows.find((r) => r.includes("held session"));
@@ -593,6 +602,28 @@ await (async () => {
       !frame.rows.some((r) => strip(r).includes("open in another coda")),
       "the lock note must not appear when nothing is locked"
     );
+  }
+
+  // A refusal from the last action is drawn in the hint row. This is the bug
+  // behind "ctrl+X nothing happened": the picker is full-screen, so a note
+  // written only to the transcript is invisible, and the key looked dead.
+  {
+    const screen = screenAt(size.cols, size.rows);
+    const notice = "that session is mid-turn -- wait for it to finish";
+    const frame = renderAt(size.cols, size.rows, screen, {
+      ...pickerState(),
+      picker: { ...pickerState().picker!, notice },
+    });
+    const rows = frame.rows.map(strip);
+    assert.ok(
+      rows.some((r) => r.includes("mid-turn")),
+      `the refusal should be on screen, got ${JSON.stringify(rows.slice(-3))}`
+    );
+    assert.ok(
+      !rows.some((r) => r.includes("Ctrl+X delete")),
+      "the refusal replaces the standing hint rather than sharing the row"
+    );
+    checkFrame(frame, size, `picker/notice ${size.cols}x${size.rows}`);
   }
 
   // The rename editor keeps its own hint: Enter and Esc mean something else
