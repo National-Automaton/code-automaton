@@ -936,17 +936,32 @@ export class Screen {
     this.visionTop = Math.max(0, Math.min(this.visionTop, maxVisionTop));
     const visionTop = this.visionTop;
 
+    // The two columns are independent lists of different lengths -- there are
+    // usually more image models than text ones -- so the body has to be as tall
+    // as the taller of the two. It used to be sized from the text list alone,
+    // which silently hid every image row past the last text row: with 15 text
+    // models and 25 image models, the cursor at index 16 was never drawn, so
+    // Left/Right looked dead.
+    const bodyRows = Math.min(listRows, Math.max(rows - start, p.vision.length - visionTop));
+
     let drawn = 0;
-    for (let i = start; i < end; i++) {
+    for (let row = 0; row < bodyRows; row++) {
+      const i = start + row;
       const m = p.models[i];
-      const active = i === p.index;
-      const isCurrent = m.id === p.selected && m.endpoint === p.selectedEndpoint;
+      // Past the last text model the left column is blank but the right one
+      // keeps drawing, which is what makes the image list fully reachable.
+      const active = i === p.index && m !== undefined;
+      const isCurrent = m !== undefined && m.id === p.selected && m.endpoint === p.selectedEndpoint;
       const mark = isCurrent ? "✓ " : "  ";
       const prefix = active ? "▸ " : "  ";
       // The endpoint is shown only when there is more than one, so the common
       // single-endpoint setup reads exactly as it did before.
       const showEndpoint = p.multi;
-      const name = showEndpoint ? `${m.id}  [${m.endpoint ?? "default"}]` : m.id;
+      const name = m === undefined
+        ? ""
+        : showEndpoint
+          ? `${m.id}  [${m.endpoint ?? "default"}]`
+          : m.id;
       const label = (prefix + mark + name).slice(0, leftWidth).padEnd(leftWidth);
 
       // Right column: the image-model list. It is the same list on every row
@@ -954,7 +969,7 @@ export class Screen {
       // ←/→ acts on what is visibly under the cursor.
       let right = "";
       if (rightWidth > 4) {
-        const vRow = visionTop + (i - start);
+        const vRow = visionTop + row;
         const name = p.vision[vRow];
         if (name) {
           const isCursor = vRow === visionIndex;

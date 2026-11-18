@@ -873,6 +873,47 @@ for (const size of SIZES) {
   );
 }
 
+// The image column is not capped by the text list.
+//
+// The two are independent lists that usually differ in length -- a real Gemini
+// endpoint served 25 image models beside 15 text ones. The body was sized from
+// the text list alone, so every image row past the last text row was dropped,
+// and since the cursor is drawn as part of a row, an image cursor beyond that
+// point was never drawn at all. Pressing Left/Right then looked like it did
+// nothing, which is exactly how it was reported.
+{
+  const state: any = modelState();
+  state.modelPicker.models = [
+    { id: "deepseek-flash", vision: false, endpoint: null },
+    { id: "grok-4", vision: false, endpoint: "grok" },
+  ];
+  state.modelPicker.vision = Array.from({ length: 12 }, (_, i) => `gemini-vision-${i}`);
+  state.modelPicker.index = 1;
+  state.modelPicker.visionIndex = 10;
+
+  const screen = screenAt(100, 40);
+  const text = renderAt(100, 40, screen, state).rows.map(strip).join("\n");
+
+  assert.ok(
+    text.includes("▸ gemini-vision-10"),
+    `an image cursor past the last text row must still be drawn, got:\n${text}`
+  );
+  assert.ok(
+    text.includes("gemini-vision-11"),
+    `image rows past the text list must still be listed, got:\n${text}`
+  );
+  assert.equal(
+    (text.match(/▸/g) ?? []).length,
+    2,
+    "still exactly one cursor per column"
+  );
+
+  // And the very last row is reachable, which is what "cannot select" meant.
+  state.modelPicker.visionIndex = 11;
+  const last = renderAt(100, 40, screenAt(100, 40), state).rows.map(strip).join("\n");
+  assert.ok(/▸ gemini-vision-11/.test(last), `the last image model must be cursored, got:\n${last}`);
+}
+
 // The image list is a column with its own cursor: moving it must be visible
 // under that cursor, not silently rewrite a label on some other row. This is
 // the regression that made it look like only the active model was selectable.
