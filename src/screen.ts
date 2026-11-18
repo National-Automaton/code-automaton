@@ -24,6 +24,8 @@ const CLEAR = ESC + "2J" + ESC + "H";
  */
 const HOME = ESC + "H";
 const ERASE_LINE = ESC + "K";
+/** Erase the whole screen (contents only; the cursor is homed separately). */
+const ERASE_SCREEN = ESC + "2J";
 /**
  * Mouse reporting, SGR encoding (1006) on top of button events (1000).
  *
@@ -347,9 +349,38 @@ export class Screen {
    * it at once instead of showing a stale number under a fresh status.
    */
   private stickyTools = { count: 0, seq: -1, since: 0 };
+  /**
+   * What to do after the terminal is resized.
+   *
+   * Set by the owner (`App`) so a resize repaints at the new size. Without it
+   * the dimensions changed underneath a frame already painted for the old
+   * size: the next frame was a different length, `draw()` only overwrites from
+   * home, and the tail of the old frame stayed on screen -- which is what left
+   * the bottom half showing stale content with two carets.
+   *
+   * A resize also invalidates anything cached against the old width (wrapped
+   * transcript rows, scroll offsets), so the owner re-renders rather than
+   * nudging a dimension here.
+   */
+  onResize: (() => void) | null = null;
+
+  /**
+   * Handle a terminal resize.
+   *
+   * Windows Terminal reports its real size slightly after start-up, so the
+   * first frame is commonly painted at the wrong dimensions and this fires
+   * moments later. Clearing before the repaint is what removes the rows the
+   * previous, differently-sized frame left behind.
+   */
   private resizeHandler = () => {
-    this.cols = stdout.columns || 80;
-    this.rows = stdout.rows || 24;
+    const cols = stdout.columns || 80;
+    const rows = stdout.rows || 24;
+    if (cols === this.cols && rows === this.rows) return;
+    this.cols = cols;
+    this.rows = rows;
+    // The owner repaints; `draw()` homes the cursor and repaints from row 0,
+    // and the repaint begins with CLEAR so no row of the old frame survives.
+    this.onResize?.();
   };
 
   get width(): number {
@@ -519,9 +550,18 @@ export class Screen {
     // frame that simply stopped short left a stale status line visible below
     // the new one.
     const painted = lines.length < this.rows ? [...lines, ""] : lines;
+
+    // Erase first, then home and draw. Overwriting from home is enough while a
+    // frame never gets shorter than the last one, but a resize -- or simply a
+    // shorter list -- leaves rows of the previous frame below the new one. That
+    // is what left the bottom half of the screen showing stale content, with a
+    // second caret, right after start-up: Windows Terminal reports its real
+    // size shortly after the first frame is painted.
+    //
     // Newlines only separate rows -- no trailing "\r\n" after the last one,
     // which would scroll the viewport on the bottom row.
-    const payload = HOME + painted.map((l) => l + ERASE_LINE).join("\r\n");
+    const payload =
+      ERASE_SCREEN + HOME + painted.map((l) => l + ERASE_LINE).join("\r\n");
     stdout.write(payload);
     // Park the cursor on the top row rather than leaving it on the last one:
     // a cursor on the bottom row is in the terminal's pending-wrap state, and

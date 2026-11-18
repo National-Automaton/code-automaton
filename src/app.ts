@@ -250,6 +250,11 @@ export class App {
     // listed; locking them would deny other terminals every saved session.
     this.claimActive();
 
+    // Repaint when the terminal is resized. Windows Terminal reports its real
+    // size shortly after the first frame is drawn, so without this the session
+    // opens at the wrong dimensions and the stale rows below the new frame stay
+    // on screen -- a half-drawn view with two carets.
+    this.screen.onResize = () => this.requestRender();
     this.screen.start();
     this.keys.onKey((k) => this.onKey(k));
     this.keys.start();
