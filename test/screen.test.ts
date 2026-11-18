@@ -873,6 +873,38 @@ for (const size of SIZES) {
   );
 }
 
+// A full picker frame never reaches the reserved bottom row.
+//
+// `render()` budgets `rows - 1`, and `draw()` pads the frame onto the reserved
+// bottom row -- safe only while the frame is strictly shorter than the
+// terminal. An overlay that filled the budget exactly left `draw()` no spare
+// row, so it wrote the reserved line (pending-wrap), and the terminal scrolled
+// by one. The symptom was the picker's bottom half stranded over the transcript
+// with a second caret at the bottom of the screen.
+//
+// It bites when the list is long enough to fill every row, which is the common
+// case against a real endpoint.
+for (const [cols, rows] of [[80, 24], [100, 30], [120, 40], [80, 12]] as const) {
+  const state: any = modelState();
+  state.modelPicker.models = Array.from({ length: 40 }, (_, i) => ({
+    id: `text-model-${i}`,
+    vision: false,
+    endpoint: null,
+  }));
+  state.modelPicker.vision = Array.from({ length: 40 }, (_, i) => `gemini-vision-${i}`);
+  state.modelPicker.visionIndex = 20;
+  state.modelPicker.index = 2;
+
+  const screen = screenAt(cols, rows);
+  const out: string[] = ["header", ""];   // as render() hands the overlay
+  (screen as any).renderModelPicker(state.modelPicker, out, cols, rows - 1);
+  const painted = out.length < rows ? out.length + 1 : out.length;
+  assert.ok(
+    painted < rows,
+    `${cols}x${rows}: frame of ${out.length} painted as ${painted} would write the reserved bottom row`
+  );
+}
+
 // The image column is not capped by the text list.
 //
 // The two are independent lists that usually differ in length -- a real Gemini

@@ -890,9 +890,20 @@ export class Screen {
   ): void {
     const rule = DIM + "─".repeat(Math.max(1, width - 1)) + RESET;
     const rows = p.models.length;
-    // Header row + rule + hint + rule, plus the heading line.
-    const fixed = 4;
-    const listRows = Math.max(0, height - 2 - fixed);
+    // Rows this overlay may emit, in total.
+    //
+    // `height` is what `render()` budgets (the terminal minus the reserved
+    // bottom row), and `out` already holds the header and its blank row when
+    // this is called -- so the overlay's own rows get `height - 2`. Filling
+    // `height` exactly would leave `draw()` no spare row to pad on the reserved
+    // line: writing that line puts the terminal in pending-wrap state and
+    // scrolls the frame by one, which showed up as the picker stranded over the
+    // transcript with a stray caret.
+    const budget = Math.max(1, height - out.length);
+    // Hint + rule, the note + rule below, and one spare row so the frame is
+    // never exactly full.
+    const fixed = 5;
+    const listRows = Math.max(0, budget - fixed);
     this.lastHelpRows = 0;
 
     // Clamped like every other row: an over-long hint soft-wraps, which shifts
