@@ -584,6 +584,12 @@ With a single endpoint the `[name]` tags are omitted; they appear once
   one image route, chosen whenever the history contains an image. The bottom
   line says so — **when an image is in the history the image model answers,
   whatever text model is ticked**.
+- That image route belongs to the **default endpoint** (it comes from
+  `CODA_VISION_*`). A session switched to another endpoint therefore refuses to
+  send when its history contains an image, rather than quietly sending it to a
+  different service: switch back with `/model` to use images. The `←/→ image`
+  keys are only shown when they can act — on the default endpoint, with more
+  than one image model.
 - A model whose name advertises image support appears in the image column, as
   does any configured `CODA_VISION_MODEL`, which is trusted regardless of its
   name. When nothing image-capable exists the column is empty and ←/→ do

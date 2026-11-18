@@ -434,6 +434,7 @@ export class App {
       selected: bareId(route.textModel),
       selectedEndpoint: route.endpoint,
       multi: this.hasSeveralEndpoints(),
+      endpoint: route.endpoint,
       vision,
       // `m.visionIndex` is already an index into this list. It is clamped, not
       // re-resolved through `indexOf`: round-tripping it through the name meant
