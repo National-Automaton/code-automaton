@@ -427,10 +427,15 @@ secret "gmail" — value hidden:
 
 **How it protects the value**
 
-- **Typed hidden.** The field draws one `•` per character. The value is never
-  echoed to the terminal, so it cannot reach a scrollback buffer, a screen
-  recording, or a screenshot. Only the length is visible, which is unavoidable
-  if the caret is to point anywhere.
+- **Typed hidden, or pasted.** The field draws one `•` per character. The value
+  is never echoed to the terminal, so it cannot reach a scrollback buffer, a
+  screen recording, or a screenshot. Only the length is visible, which is
+  unavoidable if the caret is to point anywhere. Pasting works (typing an
+  84-character key blind is a good way to end up storing it somewhere worse);
+  a pasted value is held in exactly the same buffer as a typed one, and a
+  trailing newline -- what `cat key` produces -- is trimmed. A paste that spans
+  more than one line is refused rather than flattened, since silently storing
+  `key\nrest` would fail authentication with no clue why.
 - **Never printed.** `/secret list` reports names and character counts. There is
   no "first four characters" hint — that convenience is exactly the leak the
   vault exists to avoid.

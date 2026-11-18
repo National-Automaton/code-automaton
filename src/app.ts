@@ -701,11 +701,21 @@ export class App {
   /**
    * Keys while the secret prompt is open.
    *
-   * Everything here exists to keep the value out of sight. Paste is refused: a
-   * pasted credential would sit in the terminal's own paste stream and in the
-   * clipboard history, which defeats the prompt. The value is never echoed, is
-   * not rendered (the screen draws bullets), and is not put in the transcript
-   * on Enter -- only that a secret was saved.
+   * Everything here exists to keep the value out of sight: it is never echoed,
+   * is not rendered (the screen draws bullets), and is not put in the
+   * transcript on Enter -- only that a secret was saved.
+   *
+   * Paste is allowed. Refusing it did not protect anything: a pasted value
+   * lands in the same `LineBuffer` as a typed one, and the clipboard already
+   * held the secret before coda was started, so the refusal only forced an
+   * 84-character credential to be typed blind -- which pushes people towards
+   * storing it somewhere worse. The protections that matter (masking,
+   * `trackSecret`, the 0600 write) are identical either way.
+   *
+   * A paste containing a newline is refused rather than flattened. The other
+   * input buffers turn newlines into spaces so a multi-line paste stays one
+   * line; for a credential that would silently store the wrong value, so the
+   * user is told instead.
    */
   private onSecretKey(k: Key): void {
     const p = this.secretPrompt!;
@@ -786,11 +796,18 @@ export class App {
       case "char":
         b.insert(k.ch);
         break;
-      case "paste":
-        // Refused deliberately -- see the method comment. Say so, or it looks
-        // like the terminal is broken.
-        this.systemNote("secret: paste is disabled here; type the value");
+      case "paste": {
+        // One line only: a credential with a newline in it is almost always a
+        // multi-line paste that should have been trimmed by the user, and
+        // storing "key\nrest" would fail authentication with no clue why.
+        const pasted = k.text.replace(/\r?\n$/, "");
+        if (/[\r\n]/.test(pasted)) {
+          this.systemNote("secret: paste contained multiple lines; enter the value on one line");
+        } else if (pasted) {
+          b.insert(pasted);
+        }
         break;
+      }
       // up/down/tab/wheel do nothing while a secret is being typed.
     }
     this.requestRender();
