@@ -1,4 +1,4 @@
-import { Config } from "./config.js";
+import { Config, endpointsFile, saveEndpoints } from "./config.js";
 import { Key, KeyReader } from "./keys.js";
 import { LineBuffer, PromptRecall } from "./linebuffer.js";
 import type { RecalledPrompt } from "./linebuffer.js";
@@ -886,6 +886,129 @@ export class App {
     );
   }
 
+  /**
+   * `/endpoint` — list, add, remove the alternative text endpoints.
+   *
+   * The file is written by coda rather than by hand so its format never has to
+   * be remembered: `add` writes valid JSON with the entry in it, and `list`
+   * shows what was read back. Nothing here touches a credential -- `add` takes
+   * the *name* of a vault entry, and the key itself is stored with `/secret`.
+   */
+  private handleEndpointCommand(arg: string): void {
+    const words = arg.split(/\s+/).filter(Boolean);
+    const sub = words[0];
+    const endpoints = this.config.endpoints ?? [];
+
+    const show = (body: string) => {
+      this.systemNote(body);
+      this.requestRender();
+    };
+
+    if (!sub || sub === "list") {
+      if (endpoints.length === 0) {
+        show(
+          "no additional endpoints.   /endpoint add <name> <baseURL> <model> [--key <vault-name>]\n" +
+            `file: ${endpointsFile()}`
+        );
+        return;
+      }
+      const lines = endpoints.map((e) => {
+        // Show the key *name*, never a value, and flag one that is not stored
+        // yet -- that is the difference between "configured" and "usable".
+        const key = e.apiKey
+          ? hasSecret(e.apiKey)
+            ? `key: ${e.apiKey}`
+            : `key: ${e.apiKey} (NOT STORED -- /secret add ${e.apiKey})`
+          : "no key";
+        return `  ${e.name.padEnd(16)} ${e.model}\n      ${e.baseURL}   ${key}`;
+      });
+      const active = this.current().route.endpoint;
+      show(
+        `additional endpoints (${endpointsFile()}):\n` +
+          lines.join("\n") +
+          (active ? `\n\nin use by this session: ${active}` : "")
+      );
+      return;
+    }
+
+    if (sub === "add" || sub === "set") {
+      // `--key <vault-name>` is a flag pair; everything else is positional.
+      const ki = words.indexOf("--key");
+      const keyName = ki !== -1 ? words[ki + 1] : undefined;
+      const positional = words.filter((_, i) => i !== 0 && (ki === -1 || (i !== ki && i !== ki + 1)));
+      if (positional.length !== 3 || (ki !== -1 && !keyName)) {
+        show(
+          "usage: /endpoint add <name> <baseURL> <model> [--key <vault-name>]\n" +
+            "  e.g. /endpoint add grok https://api.x.ai/v1 grok-4 --key grok"
+        );
+        return;
+      }
+      const [name, baseURL, model] = positional;
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(name)) {
+        show("a name is one word: letters, digits, . _ - (it labels the rows in /model)");
+        return;
+      }
+      if (!/^https?:\/\//.test(baseURL)) {
+        show(`baseURL must start with http:// or https://  (got: ${baseURL})`);
+        return;
+      }
+      if (endpoints.some((e) => e.name === name)) {
+        show(`endpoint "${name}" already exists.   /endpoint remove ${name}  to replace it`);
+        return;
+      }
+      // Warn rather than refuse: a key may legitimately be stored later, and
+      // refusing here would make the order of the two commands matter.
+      const missingKey = keyName && !hasSecret(keyName);
+      const next = [...endpoints, { name, baseURL, model, ...(keyName ? { apiKey: keyName } : {}) }];
+      const err = saveEndpoints(next);
+      if (err) {
+        show(`could not write ${err}`);
+        return;
+      }
+      // Keep the running config in step, so the picker sees it without a
+      // restart: the command wrote the file, not the in-memory copy.
+      this.config.endpoints = next;
+      show(
+        `endpoint "${name}" added: ${model} at ${baseURL}` +
+          (keyName ? ` using vault entry "${keyName}"` : " with no key") +
+          (missingKey ? `\n  note: "${keyName}" is not in the vault yet -- /secret add ${keyName}` : "") +
+          "\n  /model to switch this session to it"
+      );
+      return;
+    }
+
+    if (sub === "remove" || sub === "delete" || sub === "rm") {
+      const name = words[1];
+      if (!name) {
+        show("usage: /endpoint remove <name>");
+        return;
+      }
+      if (!endpoints.some((e) => e.name === name)) {
+        show(`no endpoint named "${name}"`);
+        return;
+      }
+      const next = endpoints.filter((e) => e.name !== name);
+      const err = saveEndpoints(next);
+      if (err) {
+        show(`could not write ${err}`);
+        return;
+      }
+      this.config.endpoints = next;
+      // The session keeps the name until the user picks something else; the
+      // agent reports it as missing on the next request and the open path
+      // notes the fallback, so nothing is silently rerouted here.
+      show(
+        `endpoint "${name}" removed` +
+          (this.current().route.endpoint === name
+            ? "\n  this session was using it; it now falls back to the default endpoint"
+            : "")
+      );
+      return;
+    }
+
+    show("usage: /endpoint [list | add <name> <baseURL> <model> [--key <vault-name>] | remove <name>]");
+  }
+
   /** `/secret` — list, add, remove. Values are never printed. */
   private handleSecretCommand(arg: string): void {
     const [sub, ...rest] = arg.split(/\s+/).filter(Boolean);
@@ -1656,6 +1779,7 @@ export class App {
         "  /image <path>       Attach an image file to your next message",
         "  /rename <title>     Rename the current session (no title: edit it interactively)",
         "  /model              Choose this session's text and image model",
+        "  /endpoint <list|add|remove>  Manage additional model endpoints (written for you)",
         "  /secret <add|list|remove>  Manage the credentials vault (values entered hidden)",
         "  /instructions       Show standing instructions and where they are read from",
         "  /prune-images       Delete cached screenshots no session refers to",
@@ -2188,6 +2312,14 @@ export class App {
     // `/secret` manages credentials. The value is always entered at a masked
     // prompt, never as an argument: an argument would be echoed into the
     // input line, kept in the session's transcript, and saved to disk.
+    // `/endpoint` manages the alternative text endpoints (endpoints.json).
+    // coda writes the file so the format never has to be hand-remembered.
+    if (text === "/endpoint" || text.startsWith("/endpoint ")) {
+      const arg = text.slice("/endpoint".length).trim();
+      clrInput();
+      this.handleEndpointCommand(arg);
+      return true;
+    }
     if (text === "/secret" || text.startsWith("/secret ")) {
       const arg = text.slice("/secret".length).trim();
       clrInput();
