@@ -178,12 +178,14 @@ function modelState(index = 1, visionIndex = 1, usingVision = true) {
     ...chatState(),
     modelPicker: {
       models: [
-        { id: "deepseek-flash", vision: false },
-        { id: "deepseek-v4-pro", vision: false },
-        { id: "gemini-2.5-flash-native-audio", vision: true },
+        { id: "deepseek-flash", vision: false, endpoint: null },
+        { id: "deepseek-v4-pro", vision: false, endpoint: null },
+        { id: "gemini-2.5-flash-native-audio", vision: true, endpoint: null },
       ],
       index,
       selected: "deepseek-v4-pro",
+      selectedEndpoint: null,
+      multi: false,
       vision: ["gemini-2.5-flash", "gemini-3.6-flash"],
       visionIndex,
       usingVision,

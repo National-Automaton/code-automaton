@@ -220,11 +220,20 @@ export interface RenderState {
    * absent means "not open".
    */
   modelPicker?: {
-    models: { id: string; vision: boolean }[];
+    /**
+     * Text models to choose between. Each carries its endpoint because an id
+     * alone is ambiguous: two endpoints can list the same name.
+     */
+    models: { id: string; vision: boolean; endpoint: string | null }[];
     /** Highlighted chat model. */
     index: number;
-    /** Model this session currently uses, to place the ✓. */
+    /**
+     * The model and endpoint this session currently uses, to place the ✓.
+     * Compared as a pair so a same-named model on another endpoint is not
+     * ticked by mistake.
+     */
     selected: string;
+    selectedEndpoint: string | null;
     /**
      * Image models to choose between and the one in force. Empty when nothing
      * image-capable is available, in which case the right-hand column is blank
@@ -236,6 +245,8 @@ export interface RenderState {
     visionTop?: number;
     /** True when history holds an image, so vision routing is actually in use. */
     usingVision: boolean;
+    /** True when more than one endpoint exists, so rows name their endpoint. */
+    multi: boolean;
     /** Note about where the list came from, or why it is only config. */
     notice: string;
   } | null;
@@ -929,10 +940,14 @@ export class Screen {
     for (let i = start; i < end; i++) {
       const m = p.models[i];
       const active = i === p.index;
-      const isCurrent = m.id === p.selected;
+      const isCurrent = m.id === p.selected && m.endpoint === p.selectedEndpoint;
       const mark = isCurrent ? "✓ " : "  ";
       const prefix = active ? "▸ " : "  ";
-      const label = (prefix + mark + m.id).slice(0, leftWidth).padEnd(leftWidth);
+      // The endpoint is shown only when there is more than one, so the common
+      // single-endpoint setup reads exactly as it did before.
+      const showEndpoint = p.multi;
+      const name = showEndpoint ? `${m.id}  [${m.endpoint ?? "default"}]` : m.id;
+      const label = (prefix + mark + name).slice(0, leftWidth).padEnd(leftWidth);
 
       // Right column: the image-model list. It is the same list on every row
       // (there is one image setting, not one per text model), drawn in place so

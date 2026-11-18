@@ -161,7 +161,13 @@ async function main() {
         })
       );
 
-      const [loaded] = await loadAllWithMtime();
+      const all = await loadAllWithMtime();
+      const loaded = all.find((l) => l.record.id === id);
+      assert.ok(loaded, `the fixture must be loaded, not shadowed by another session: ${all.map((l) => `${l.record.id}/${l.record.turnOpen}`).join(", ")}`);
+      // The *found* record, not the first one listed: `loadAllWithMtime` sorts
+      // by `updatedAt` and every record here is written in the same
+      // millisecond, so `[0]` is whichever the filesystem happened to order
+      // first -- which made this assertion pass or fail by luck.
       const session = new Session(cfg, loaded.record, loaded.mtimeMs);
       assert.equal(session.recovered, true, "the session knows its turn was cut short");
       assert.equal(

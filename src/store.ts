@@ -56,6 +56,15 @@ export interface SessionRecord {
    * session is adopted as idle and marked `recovered` (see `Session`).
    */
   turnOpen?: boolean;
+  /**
+   * The alternative text endpoint this session used, by name.
+   *
+   * Optional and absent for the `CODA_*` endpoint, which is what every record
+   * written before this existed used. A name that is no longer in
+   * `endpoints.json` loads as the default endpoint with a visible note rather
+   * than failing to open (see `Agent.endpointMissing`).
+   */
+  endpoint?: string;
 }
 
 function isRecord(v: any): v is SessionRecord {

@@ -5,13 +5,41 @@ import { applyPunycodeShim } from "./punycode-shim.js";
 applyPunycodeShim();
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+/**
+ * An alternative text endpoint, selectable from `/model`.
+ *
+ * The fields are the same three the default endpoint takes from `CODA_*`, plus
+ * a name to show in the picker. `apiKey` is a *vault name*, never a key: the
+ * value is read from `secrets.ts` when the endpoint is selected, so no
+ * credential is ever written to `endpoints.json` or a session file.
+ */
+export interface Endpoint {
+  /** Short label shown in the picker. Unique within the file. */
+  name: string;
+  baseURL: string;
+  model: string;
+  /**
+   * Vault entry holding this endpoint's key. Optional when the endpoint
+   * genuinely needs none (a local llama.cpp server accepts any bearer), in
+   * which case an empty key is sent.
+   */
+  apiKey?: string;
+}
 
 export interface Config {
   apiKey: string;
   baseURL: string;
   model: string;
+  /**
+   * Additional text endpoints, in file order. The `CODA_*` endpoint is always
+   * endpoint zero and is not listed here, so an empty array means "one
+   * endpoint", which is the behaviour every existing setup already has.
+   */
+  endpoints: Endpoint[];
   /**
    * Model/endpoint used when a request contains an image. Each falls back to
    * its text counterpart, so text-only setups need no extra configuration.
@@ -94,6 +122,82 @@ function loadDotEnv(): void {
   }
 }
 
+/**
+ * Where `endpoints.json` lives.
+ *
+ * Beside the vault rather than in the working directory: endpoint *definitions*
+ * are not secret (they name keys, they do not contain them), but they belong to
+ * the user rather than to whichever project happens to be open, and a project
+ * checkout is the wrong place for them -- `git clean` would remove them.
+ *
+ * `CODA_ENDPOINTS_FILE` overrides the whole path so tests never read the real
+ * one.
+ */
+function endpointsPath(): string {
+  const override = process.env.CODA_ENDPOINTS_FILE;
+  if (override) return path.resolve(override);
+  const base = process.env.XDG_CONFIG_HOME
+    ? path.resolve(process.env.XDG_CONFIG_HOME)
+    : path.join(os.homedir(), ".config");
+  return path.join(base, "coda", "endpoints.json");
+}
+
+/**
+ * Read `endpoints.json`, or return [] if it is absent or unusable.
+ *
+ * A malformed file warns and yields no endpoints rather than failing startup:
+ * the `CODA_*` endpoint still works, so the user keeps a usable program and is
+ * told why their extra endpoints are missing. Entries that are individually
+ * invalid are skipped the same way -- one bad row must not remove the others.
+ *
+ * Nothing here reads a key. `apiKey` is recorded as a *name* for `secrets.ts` to
+ * resolve later, so a malformed file can never echo a credential into a warning.
+ */
+export function loadEndpoints(): Endpoint[] {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(endpointsPath(), "utf8");
+  } catch {
+    return []; // absent is the normal case, not an error
+  }
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e: any) {
+    console.error(`warning: ${endpointsPath()} is not valid JSON: ${e?.message ?? e}`);
+    return [];
+  }
+
+  const rows = Array.isArray(parsed?.endpoints) ? parsed.endpoints : null;
+  if (!rows) {
+    console.error(`warning: ${endpointsPath()} has no "endpoints" array`);
+    return [];
+  }
+
+  const out: Endpoint[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const name = typeof row?.name === "string" ? row.name.trim() : "";
+    const baseURL = typeof row?.baseURL === "string" ? row.baseURL.trim() : "";
+    const model = typeof row?.model === "string" ? row.model.trim() : "";
+    if (!name || !baseURL || !model) {
+      console.error(`warning: ${endpointsPath()}: skipping an entry missing name, baseURL or model`);
+      continue;
+    }
+    // Names address endpoints on the command line and in a saved session, so a
+    // duplicate is ambiguous rather than harmless. The first one wins.
+    if (seen.has(name)) {
+      console.error(`warning: ${endpointsPath()}: duplicate endpoint "${name}" ignored`);
+      continue;
+    }
+    seen.add(name);
+    const apiKey = typeof row?.apiKey === "string" && row.apiKey.trim() ? row.apiKey.trim() : undefined;
+    out.push({ name, baseURL, model, apiKey });
+  }
+  return out;
+}
+
 export function loadConfig(): Config {
   loadDotEnv();
 
@@ -154,6 +258,7 @@ export function loadConfig(): Config {
     apiKey,
     baseURL,
     model,
+    endpoints: loadEndpoints(),
     visionModel: env("CODA_VISION_MODEL") ?? model,
     visionBaseURL: env("CODA_VISION_BASE_URL") ?? baseURL,
     visionApiKey: env("CODA_VISION_API_KEY") ?? apiKey,

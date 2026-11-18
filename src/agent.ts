@@ -4,9 +4,10 @@ import type {
   ChatCompletionMessageToolCall,
 } from "openai/resources/chat/completions";
 import { Config } from "./config.js";
+import type { Endpoint } from "./config.js";
 import { parallelBatch, runTool, secretNamesIn, toolDefinitions } from "./tools.js";
 import type { ToolResult } from "./tools.js";
-import { hasSecret, isValidName, normaliseName, redact, setSecret, trackSecret } from "./secrets.js";
+import { getSecret, hasSecret, isValidName, normaliseName, redact, setSecret, trackSecret } from "./secrets.js";
 import { systemPrompt } from "./instructions.js";
 import {
   AttachedImage,
@@ -394,6 +395,17 @@ export class Agent {
   toolPeak = 0;
 
   private visionClient: OpenAI;
+  /**
+   * Clients for the alternative endpoints in `endpoints.json`, built on first
+   * use and keyed by endpoint name.
+   *
+   * Built lazily rather than in the constructor so a missing vault entry only
+   * fails when that endpoint is actually chosen -- an endpoint whose key was
+   * deleted must not stop the app starting on the endpoint that works.
+   */
+  private endpointClients = new Map<string, OpenAI>();
+  /** The endpoint chosen for this session; null means the `CODA_*` one. */
+  private endpointName: string | null = null;
 
   constructor(
     private config: Config,
@@ -841,6 +853,10 @@ export class Agent {
     textModel: string;
     textOverride: string | null;
     visionOverride: string | null;
+    /** Selected alternative endpoint, or null for the `CODA_*` one. */
+    endpoint: string | null;
+    /** True when `endpoint` names one that is no longer configured. */
+    endpointMissing: boolean;
   } {
     const usingVision = this.needsVision();
     return {
@@ -850,15 +866,67 @@ export class Agent {
       textModel: this.textModelName(),
       textOverride: this.modelOverride,
       visionOverride: this.visionOverride,
+      endpoint: this.endpointName,
+      endpointMissing: this.endpointMissing(),
     };
   }
 
   private textModelName(): string {
-    return this.modelOverride ?? this.config.model;
+    return this.modelOverride ?? this.activeEndpoint()?.model ?? this.config.model;
   }
 
   private visionModelName(): string {
     return this.visionOverride ?? this.config.visionModel;
+  }
+
+  /**
+   * The alternative endpoint this session uses, or undefined for `CODA_*`.
+   *
+   * Resolved by name against config each time rather than held as an object, so
+   * a name that no longer exists in `endpoints.json` degrades to the default
+   * endpoint instead of pinning a stale copy in memory.
+   */
+  private activeEndpoint(): Endpoint | undefined {
+    if (!this.endpointName) return undefined;
+    return (this.config.endpoints ?? []).find((e) => e.name === this.endpointName);
+  }
+
+  /**
+   * True when `endpointName` was requested but is not in config.
+   *
+   * The app reports this on load: silently continuing on `CODA_*` would let a
+   * reopened session talk to a different service than the one it was written
+   * against, which is the sort of thing the user must be told about rather than
+   * left to notice.
+   */
+  endpointMissing(): boolean {
+    return this.endpointName !== null && !this.activeEndpoint();
+  }
+
+  /**
+   * The client for an alternative endpoint, reading its key from the vault.
+   *
+   * Throws when the named vault entry is absent: sending the request with an
+   * empty key would fail at the provider with a message that says nothing about
+   * the real problem. The message names the *vault entry*, never a value.
+   */
+  private endpointClient(endpoint: Endpoint): OpenAI {
+    const cached = this.endpointClients.get(endpoint.name);
+    if (cached) return cached;
+    const key = endpoint.apiKey ? getSecret(endpoint.apiKey) : "";
+    if (endpoint.apiKey && key === null) {
+      throw new Error(
+        `endpoint "${endpoint.name}" needs vault entry "${endpoint.apiKey}", ` +
+          `which is not stored. Add it with /secret set ${endpoint.apiKey}`
+      );
+    }
+    const client = new OpenAI({
+      apiKey: key ?? "",
+      baseURL: endpoint.baseURL,
+      fetch: globalThis.fetch,
+    });
+    this.endpointClients.set(endpoint.name, client);
+    return client;
   }
 
   /** Choose this session's models. Null restores the configured value. */
@@ -867,11 +935,36 @@ export class Agent {
     this.visionOverride = vision;
   }
 
+  /**
+   * Choose this session's text endpoint. Null means the `CODA_*` endpoint.
+   *
+   * The model override is deliberately *not* cleared here: an endpoint and a
+   * model are chosen together by the picker, and clearing one would silently
+   * undo the other's selection. `setModels` is what the caller then uses.
+   */
+  setEndpoint(name: string | null): void {
+    this.endpointName = name;
+  }
+
   /** The client and model to use for the next request. */
   private route(): { client: OpenAI; model: string } {
-    return this.needsVision()
-      ? { client: this.visionClient, model: this.visionModelName() }
-      : { client: this.client, model: this.textModelName() };
+    if (this.needsVision()) {
+      return { client: this.visionClient, model: this.visionModelName() };
+    }
+    return this.textRoute();
+  }
+
+  /**
+   * The client and model for a text request.
+   *
+   * Every text request goes through here -- the main turn and the compaction
+   * summariser alike -- so a session pinned to an alternative endpoint cannot
+   * leak a summarise call onto the default one.
+   */
+  private textRoute(): { client: OpenAI; model: string } {
+    const endpoint = this.activeEndpoint();
+    if (!endpoint) return { client: this.client, model: this.textModelName() };
+    return { client: this.endpointClient(endpoint), model: this.textModelName() };
   }
 
   /**
@@ -900,8 +993,9 @@ export class Agent {
       })
       .join("\n\n");
 
-    const res = await this.client.chat.completions.create({
-      model: this.textModelName(),
+    const summariser = this.textRoute();
+    const res = await summariser.client.chat.completions.create({
+      model: summariser.model,
       messages: [
         {
           role: "system",

@@ -1,4 +1,5 @@
 import type { Config } from "./config.js";
+import { getSecret } from "./secrets.js";
 
 /**
  * The list of models available on an endpoint, and the props of each.
@@ -33,6 +34,14 @@ export interface ModelInfo {
    * used to be possible and broke the session on the next message.
    */
   text: boolean;
+  /**
+   * The alternative endpoint this model belongs to, or null for `CODA_*`.
+   *
+   * A model id is only meaningful together with the service that serves it, so
+   * the picker reports the pair rather than the id alone. Two endpoints can
+   * list the same id and mean different things by it.
+   */
+  endpoint: string | null;
 }
 
 export interface ModelCatalog {
@@ -194,28 +203,56 @@ async function fetchEndpoint(
  * is already running on it.
  */
 export async function loadCatalog(config: Config): Promise<ModelCatalog> {
+  // Defensive: `Config.endpoints` is required, but a caller that builds a
+  // partial config object (tests, embedders) would otherwise crash the picker
+  // with a TypeError instead of showing the one endpoint it does have.
+  const endpoints = config.endpoints ?? [];
   const sameEndpoint =
     config.visionBaseURL === config.baseURL &&
     config.visionApiKey === config.apiKey;
 
-  const [textList, visionList] = await Promise.all([
+  // One fetch per endpoint. The extra endpoints are queried with the same
+  // concurrent style: a slow one must not serialise the picker.
+  const [textList, visionList, ...extraLists] = await Promise.all([
     fetchEndpoint(config.baseURL, config.apiKey),
     sameEndpoint
       ? Promise.resolve<string[] | null>(null)
       : fetchEndpoint(config.visionBaseURL, config.visionApiKey),
+    // A key that is not in the vault yet still yields a listable endpoint: the
+    // models are known from `endpoints.json` even when the key is missing, so
+    // the picker shows the endpoint and the send path reports the real problem.
+    ...endpoints.map((e) =>
+      fetchEndpoint(e.baseURL, e.apiKey ? (getSecret(e.apiKey) ?? "") : "")
+    ),
   ]);
 
   const fetched = textList !== null || visionList !== null;
 
-  // Which endpoint served each id. `visionList` is null when both models share
-  // one endpoint, in which case that endpoint serves images too.
-  const textIds = new Set<string>();
-  const visionIds = new Set<string>();
-  for (const id of textList ?? []) textIds.add(bareId(id));
+  /*
+   * Which endpoint serves which id.
+   *
+   * Keyed by `endpoint + "\u0000" + id` rather than by id alone: two endpoints
+   * may legitimately list the same id and mean different services, and pooling
+   * them is what made a vision-only model selectable as the text model in the
+   * first place (see `ModelInfo.text`).
+   */
+  const textKeys = new Set<string>();
+  const visionKeys = new Set<string>();
+  const keyOf = (endpoint: string | null, id: string) => `${endpoint ?? ""}\u0000${id}`;
+
+  const addText = (endpoint: string | null, id: string) => textKeys.add(keyOf(endpoint, bareId(id)));
+  const addVision = (endpoint: string | null, id: string) => visionKeys.add(keyOf(endpoint, bareId(id)));
+
+  for (const id of textList ?? []) addText(null, id);
   if (sameEndpoint) {
-    for (const id of textIds) visionIds.add(id);
+    // One service serves both roles, so every text id is an image id too.
+    for (const id of textList ?? []) addVision(null, id);
   }
-  for (const id of visionList ?? []) visionIds.add(bareId(id));
+  for (const id of visionList ?? []) addVision(null, id);
+
+  endpoints.forEach((endpoint, i) => {
+    for (const id of extraLists[i] ?? []) addText(endpoint.name, id);
+  });
 
   // Config values are always included, even when a list arrived: the configured
   // model may be an alias the endpoint does not list (or a local name), and
@@ -224,24 +261,40 @@ export async function loadCatalog(config: Config): Promise<ModelCatalog> {
   // endpoint's configured model.
   const textModel = bareId(config.model);
   const visionModel = config.visionModel ? bareId(config.visionModel) : "";
-  textIds.add(textModel);
-  if (visionModel) visionIds.add(visionModel);
+  addText(null, textModel);
+  if (visionModel) addVision(null, visionModel);
   // Without a configured vision model the text model is the image route (that
   // is what `Config`'s fallback does), so it is offered for images too.
-  if (!visionModel) visionIds.add(textModel);
+  if (!visionModel) addVision(null, textModel);
+  for (const e of endpoints) addText(e.name, e.model);
 
-  const ids = new Set<string>([...textIds, ...visionIds]);
+  // Endpoint order is preserved so the picker's groups read the same way as
+  // `endpoints.json`; within a group the provider's own order is kept.
+  const chat: ModelInfo[] = [];
+  const emit = (endpoint: string | null, ids: Iterable<string>) => {
+    const seen = new Set<string>();
+    for (const raw of ids) {
+      const id = bareId(raw);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (!isChatModel(id)) continue;
+      const k = keyOf(endpoint, id);
+      chat.push({
+        id,
+        chat: true,
+        // The configured vision model is trusted regardless of its name; every
+        // other model is judged by name (see `supportsImages`).
+        vision:
+          visionKeys.has(k) &&
+          (endpoint === null ? id === visionModel || supportsImages(id) : supportsImages(id)),
+        text: textKeys.has(k),
+        endpoint,
+      });
+    }
+  };
 
-  const chat = [...ids]
-    .filter((id) => isChatModel(id))
-    .map((id) => ({
-      id,
-      chat: true,
-      // The configured vision model is trusted regardless of its name; every
-      // other model is judged by name (see `supportsImages`).
-      vision: visionIds.has(id) && (id === visionModel || supportsImages(id)),
-      text: textIds.has(id),
-    }));
+  emit(null, [...new Set([...(textList ?? []).map(bareId), ...(visionList ?? []).map(bareId), textModel, visionModel].filter(Boolean))]);
+  endpoints.forEach((endpoint, i) => emit(endpoint.name, [...(extraLists[i] ?? []), endpoint.model]));
 
   return {
     chat,
