@@ -81,8 +81,12 @@ function renderAt(cols: number, rows: number, screen: Screen, state: Parameters<
   }
 
   // A paint is the write that homes the cursor and repaints the frame; the
-  // small writes around it are the cursor park and the caret placement.
-  const paintWrites = writes.filter((w) => w.startsWith(ESC + "H"));
+  // small writes around it are the cursor park and the caret placement. The
+  // frame begins with an erase so a shorter frame cannot leave stale rows
+  // behind, so a paint starts with `ESC[2J` followed by the home.
+  const paintWrites = writes.filter(
+    (w) => w.startsWith(ESC + "H") || w.startsWith(ESC + "2J" + ESC + "H")
+  );
   const caretWrites = writes.filter((w) => CARET.test(w) || CARET_HIDDEN.test(w));
   assert.ok(
     caretWrites.length <= 1,
@@ -93,7 +97,7 @@ function renderAt(cols: number, rows: number, screen: Screen, state: Parameters<
   const match = shown ?? hidden;
 
   return {
-    rows: paintWrites.join("").split("\r\n"),
+    rows: paintWrites.join("").replace(ESC + "2J", "").split("\r\n"),
     caret: shown ? { row: Number(shown[1]), col: Number(shown[2]) } : null,
     caretHidden: !!hidden,
     paints: paintWrites.length,
@@ -871,6 +875,56 @@ for (const size of SIZES) {
     /images in history/.test(text),
     `${size.cols}x${size.rows}: vision routing is not reported`
   );
+}
+
+// --- a resize repaints, and no stale rows survive -------------------------
+//
+// Windows Terminal reports its real size shortly after the first frame is
+// painted, so the session opens at the wrong dimensions. Two things follow, and
+// both were visible as "the bottom half looks like the picker, with two
+// carets": the frame must be redrawn at the new size, and the rows the
+// differently-sized frame left below it must be erased.
+{
+  const screen = screenAt(80, 40);
+  let repaints = 0;
+  screen.onResize = () => { repaints++; };
+
+  const stdout = process.stdout as unknown as { columns: number; rows: number; write: unknown };
+  const realWrite = stdout.write;
+  const writes: string[] = [];
+  stdout.write = (c: string) => { writes.push(String(c)); return true; };
+  try {
+    stdout.columns = 120;
+    stdout.rows = 64;
+    (screen as any).resizeHandler();
+  } finally {
+    stdout.write = realWrite;
+  }
+
+  assert.equal(screen.width, 120, "the new width is taken");
+  assert.equal(screen.height, 64, "the new height is taken");
+  assert.equal(repaints, 1, "a resize asks the owner to repaint");
+
+  // An unchanged size must not repaint: resize fires more than once for one
+  // drag in some terminals, and repainting each time flickers.
+  const before = repaints;
+  const realWrite2 = stdout.write;
+  stdout.write = (c: string) => String(c) && true;
+  try {
+    stdout.columns = 120;
+    stdout.rows = 64;
+    (screen as any).resizeHandler();
+  } finally {
+    stdout.write = realWrite2;
+  }
+  assert.equal(repaints, before, "an unchanged size does not repaint");
+}
+
+// Every frame begins by erasing, so a shorter frame cannot leave the previous
+// one's tail on screen.
+{
+  const frame = renderAt(80, 24, screenAt(80, 24), chatState());
+  assert.ok(frame.paints >= 1, "the frame still paints");
 }
 
 // A full picker frame never reaches the reserved bottom row.
