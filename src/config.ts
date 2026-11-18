@@ -153,6 +153,41 @@ function endpointsPath(): string {
  * Nothing here reads a key. `apiKey` is recorded as a *name* for `secrets.ts` to
  * resolve later, so a malformed file can never echo a credential into a warning.
  */
+/** The path `loadEndpoints` reads, for reporting to the user. */
+export function endpointsFile(): string {
+  return endpointsPath();
+}
+
+/**
+ * Write the endpoint list, creating the file and its directory as needed.
+ *
+ * Written via a temporary file and renamed, so an interrupted write cannot
+ * leave a half-written file that `loadEndpoints` would reject as malformed --
+ * which would silently drop every endpoint the user had configured. The
+ * directory mode matches the vault's, because `~/.config/coda/` is where the
+ * vault lives too.
+ *
+ * Returns an error string rather than throwing: the caller is a slash command,
+ * and a failed write is something to report in the transcript, not a crash.
+ */
+export function saveEndpoints(endpoints: Endpoint[]): string | null {
+  const file = endpointsPath();
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.tmp`;
+    // Pretty-printed with a trailing newline: this file is meant to be read and
+    // occasionally hand-edited, and a single line of JSON is hostile to that.
+    fs.writeFileSync(tmp, JSON.stringify({ endpoints }, null, 2) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    fs.renameSync(tmp, file);
+    return null;
+  } catch (e: any) {
+    return `${file}: ${e?.message ?? e}`;
+  }
+}
+
 export function loadEndpoints(): Endpoint[] {
   let raw: string;
   try {
