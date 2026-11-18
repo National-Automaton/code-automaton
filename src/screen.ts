@@ -249,6 +249,15 @@ export interface RenderState {
     usingVision: boolean;
     /** True when more than one endpoint exists, so rows name their endpoint. */
     multi: boolean;
+    /**
+     * The alternative endpoint this session is on, or null for the default.
+     *
+     * The image column is a property of the *default* endpoint, not of the
+     * highlighted row, so when a session is pinned elsewhere the footer has to
+     * say so -- otherwise the two columns read as one pairing that the routing
+     * does not have.
+     */
+    endpoint: string | null;
     /** Note about where the list came from, or why it is only config. */
     notice: string;
   } | null;
@@ -949,7 +958,13 @@ export class Screen {
     // Clamped like every other row: an over-long hint soft-wraps, which shifts
     // the whole frame down one row and pushes row 0 into scrollback. Built as
     // plain text and sliced before styling, the way the picker rows are.
-    const hint = "Models  (↑/↓ text · ←/→ image · Enter select · Esc cancel)";
+    // The image keys are only advertised when they can do something: they are
+    // per-endpoint, so on a pinned endpoint the choice would not be honoured,
+    // and with fewer than two image models there is nothing to move between.
+    // A hint that names a key which cannot act reads as a broken key.
+    const imageKeys =
+      p.endpoint === null && p.vision.length > 1 ? " · ←/→ image" : "";
+    const hint = `Models  (↑/↓ text${imageKeys} · Enter select · Esc cancel)`;
     out.push(BOLD + hint.slice(0, Math.max(1, width - 1)) + RESET);
     out.push(rule);
 
@@ -1057,9 +1072,19 @@ export class Screen {
     // Routing, stated plainly: with an image in the history the vision model
     // answers whatever the text selection says, so say so rather than let the ✓
     // imply otherwise.
-    const routing = p.usingVision
-      ? `images in history: requests go to ${visionLabel || "(no image model)"}`
-      : "text only: no images in history";
+    // An image forces the vision route, which belongs to the default endpoint.
+    // On a pinned endpoint that is a *different service*, so say so plainly:
+    // listing Gemini beside a Grok row without this implied a pairing the
+    // routing does not have, and the request would have gone to Gemini.
+    const foreignVision = p.endpoint !== null;
+    const imagesUnavailable = foreignVision
+      ? `images need the default endpoint: "${p.endpoint}" must switch to use them`
+      : null;
+    const routing = imagesUnavailable
+      ? imagesUnavailable
+      : p.usingVision
+        ? `images in history: requests go to ${visionLabel || "(no image model)"}`
+        : "text only: no images in history";
     const note = p.notice ? `${routing} · ${p.notice}` : routing;
     out.push(DIM + note.slice(0, Math.max(1, width - 1)) + RESET);
     this.draw(out);

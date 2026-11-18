@@ -190,6 +190,7 @@ function modelState(index = 1, visionIndex = 1, usingVision = true) {
       selected: "deepseek-v4-pro",
       selectedEndpoint: null,
       multi: false,
+      endpoint: null,
       vision: ["gemini-2.5-flash", "gemini-3.6-flash"],
       visionIndex,
       usingVision,
@@ -925,6 +926,39 @@ for (const size of SIZES) {
 {
   const frame = renderAt(80, 24, screenAt(80, 24), chatState());
   assert.ok(frame.paints >= 1, "the frame still paints");
+}
+
+// The image keys are only advertised when they can act.
+//
+// The image route belongs to the default endpoint, so on a pinned endpoint the
+// choice would not be honoured; and with fewer than two image models there is
+// nothing to move between. A hint naming a key that cannot do anything reads as
+// a broken key, which is how the empty list was reported.
+{
+  const withImage = (endpoint: string | null, vision: string[]) => {
+    const state: any = modelState();
+    state.modelPicker.endpoint = endpoint;
+    state.modelPicker.vision = vision;
+    state.modelPicker.visionIndex = 0;
+    return renderAt(130, 30, screenAt(130, 30), state).rows.map(strip).join("\n");
+  };
+
+  assert.ok(
+    withImage(null, ["gemini-a", "gemini-b"]).includes("←/→ image"),
+    "the keys are advertised when they work"
+  );
+  assert.ok(
+    !withImage("grok", ["gemini-a", "gemini-b"]).includes("←/→ image"),
+    "not advertised on a pinned endpoint, where the choice is not honoured"
+  );
+  assert.ok(
+    !withImage(null, ["gemini-a"]).includes("←/→ image"),
+    "not advertised with a single image model, where there is nothing to choose"
+  );
+  assert.ok(
+    !withImage(null, []).includes("←/→ image"),
+    "not advertised with no image models at all"
+  );
 }
 
 // A full picker frame never reaches the reserved bottom row.

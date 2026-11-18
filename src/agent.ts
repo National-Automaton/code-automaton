@@ -946,9 +946,29 @@ export class Agent {
     this.endpointName = name;
   }
 
-  /** The client and model to use for the next request. */
+  /**
+   * The client and model to use for the next request.
+   *
+   * An image in the history forces the vision route, which is a *different
+   * service* from the text endpoint. When this session is pinned to an
+   * alternative endpoint, that would silently send the conversation -- and its
+   * images -- to whichever service `CODA_VISION_*` names, with that service's
+   * key, while the picker showed a different provider. Refusing is the only
+   * honest option until vision is configurable per endpoint: the alternative is
+   * a request nobody intended, against a bill and a privacy boundary nobody
+   * agreed to.
+   */
   private route(): { client: OpenAI; model: string } {
     if (this.needsVision()) {
+      const endpoint = this.activeEndpoint();
+      if (endpoint) {
+        throw new Error(
+          `this session is on the "${endpoint.name}" endpoint, but its history contains an ` +
+            `image, and images are only served by the default endpoint ` +
+            `(${this.visionModelName().replace(/^models\//, "")}). Switch this session to the default ` +
+            `endpoint with /model, or start a session without images, to continue.`
+        );
+      }
       return { client: this.visionClient, model: this.visionModelName() };
     }
     return this.textRoute();
