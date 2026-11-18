@@ -596,25 +596,43 @@ endpoint and says so, rather than failing to open.
 
 ### Several endpoints
 
-To keep more than one text endpoint available, list them in
-`~/.config/coda/endpoints.json`:
+To keep more than one text endpoint available, add it with `/endpoint`:
+
+```
+/endpoint add grok https://api.x.ai/v1 grok-4 --key grok
+/endpoint list
+/endpoint remove grok
+```
+
+`coda` writes `~/.config/coda/endpoints.json` for you, so the file's format
+never has to be remembered. It is plain JSON, which has no comments and no
+tolerance for a trailing comma — the commands exist so you don't have to type
+it. `list` also distinguishes an endpoint whose key is stored from one whose
+key is still missing.
+
+For reference, `add` writes this:
 
 ```json
 {
   "endpoints": [
-    { "name": "openrouter", "baseURL": "https://openrouter.ai/api/v1",
-      "model": "qwen/qwen3-coder", "apiKey": "openrouter" },
-    { "name": "local", "baseURL": "http://localhost:8080/v1",
-      "model": "qwen2.5-coder" }
+    {
+      "name": "grok",
+      "baseURL": "https://api.x.ai/v1",
+      "model": "grok-4",
+      "apiKey": "grok"
+    }
   ]
 }
 ```
 
-- `apiKey` is the **name of a vault entry**, never a key itself — store it
-  first with `/secret set openrouter`. The value is read from the vault only
-  when that endpoint is selected, so no credential appears in this file, in a
-  session dump, or in an error message. Omit `apiKey` for a server that wants
-  no key (a local llama.cpp, say).
+- `--key` names a **vault entry**, never the key itself — store it with
+  `/secret add grok`. The value is read from the vault only when that endpoint
+  is selected, so no credential appears in this file, in a session dump, or in
+  an error message. Omit `--key` for a server that wants no key (a local
+  llama.cpp, say).
+- Adding an endpoint does not switch to it: `/model` does that. The order of
+  `/secret add` and `/endpoint add` does not matter; `list` flags a key that is
+  configured but not yet stored.
 - The `CODA_*` endpoint remains endpoint zero and needs no entry here. Rows are
   shown in file order, the default first.
 - Every model a row serves appears in `/model` tagged with its endpoint, and is
@@ -640,7 +658,7 @@ own is exempt and is sent as ordinary text (e.g. a pasted absolute path).
 | `CODA_BASE_URL` | `https://api.deepseek.com` (also reads `DEEPSEEK_BASE_URL` / `OPENAI_BASE_URL`) |
 | `CODA_MODEL` | `deepseek-chat` (also reads `DEEPSEEK_MODEL` / `OPENAI_MODEL`) |
 | `CODA_SESSIONS_DIR` | `~/.coda/sessions` (also reads the older `DSC_SESSIONS_DIR`) |
-| `CODA_ENDPOINTS_FILE` | `~/.config/coda/endpoints.json` (extra text endpoints; see [Several endpoints](#several-endpoints)) |
+| `CODA_ENDPOINTS_FILE` | `~/.config/coda/endpoints.json` (extra text endpoints; written by `/endpoint`) |
 | `CODA_IMAGES_DIR` | `~/.coda/images` — cached copies of attached screenshots |
 | `CODA_MOUSE` | `on` — set to `off` to leave mouse selection to the terminal (see [Scrolling back](#scrolling-back)) |
 | `CODA_PARALLEL_TOOLS` | `on` — set to `off` to run tool calls strictly in the order the model requested them (see [Parallel tool calls](#parallel-tool-calls)) |
