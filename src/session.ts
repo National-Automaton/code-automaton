@@ -214,6 +214,11 @@ export class Session {
     // running.
     if (rec?.turnOpen) this.recovered = true;
     this.agent = new Agent(config, rec?.messages);
+    // Restore the endpoint this session was written against. A name that is no
+    // longer configured is kept rather than dropped, so the app can say the
+    // session fell back (see `Agent.endpointMissing`) instead of quietly
+    // pretending it never had a choice.
+    if (rec?.endpoint) this.agent.setEndpoint(rec.endpoint);
   }
 
   /**
@@ -245,6 +250,11 @@ export class Session {
   /** Choose this session's text and image models. Null restores config. */
   setModels(text: string | null, vision: string | null): void {
     this.agent.setModels(text, vision);
+  }
+
+  /** Choose this session's text endpoint. Null restores the `CODA_*` one. */
+  setEndpoint(name: string | null): void {
+    this.agent.setEndpoint(name);
   }
 
   /**
@@ -504,6 +514,12 @@ export class Session {
       updatedAt: this.updatedAt,
       messages: this.agent.messages,
       entries: this.entries,
+      // The endpoint is part of what the session *is*, not of a turn: without
+      // it a reopened session would silently continue on whatever `CODA_*`
+      // points at, which may be a different service entirely.
+      ...(this.agent.currentRoute().endpoint
+        ? { endpoint: this.agent.currentRoute().endpoint! }
+        : {}),
       // Written last so a crash between the two writes below leaves the
       // *previous* turn's state rather than a half-applied one. See `turnOpen`.
       ...(this.turnOpen ? { turnOpen: true } : {}),

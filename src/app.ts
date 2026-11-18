@@ -398,6 +398,16 @@ export class App {
     return catalogue.chat.filter((c) => c.text);
   }
 
+  /**
+   * True when there is more than one text endpoint to choose between.
+   *
+   * Gates the endpoint label on each row: with a single endpoint every row
+   * would carry "[default]", which is noise describing the only possibility.
+   */
+  private hasSeveralEndpoints(): boolean {
+    return (this.config.endpoints ?? []).length > 0;
+  }
+
   /** Build the screen's view of the `/model` overlay from the app's state. */
   private modelPickerState(
     m: NonNullable<App["modelPicker"]>
@@ -410,9 +420,15 @@ export class App {
     const current = route.visionModel ? bareId(route.visionModel) : "";
     if (current && !vision.includes(current)) vision.push(current);
     return {
-      models: this.textChoices(m.catalogue).map((c) => ({ id: c.id, vision: c.vision })),
+      models: this.textChoices(m.catalogue).map((c) => ({
+        id: c.id,
+        vision: c.vision,
+        endpoint: c.endpoint,
+      })),
       index: m.index,
       selected: bareId(route.textModel),
+      selectedEndpoint: route.endpoint,
+      multi: this.hasSeveralEndpoints(),
       vision,
       // `m.visionIndex` is already an index into this list. It is clamped, not
       // re-resolved through `indexOf`: round-tripping it through the name meant
@@ -610,19 +626,26 @@ export class App {
         this.requestRender();
         return;
       case "enter": {
-        const chosen = models[m.index]?.id;
-        if (chosen) {
+        const picked = models[m.index];
+        if (picked) {
+          const chosen = picked.id;
           const visionChoice = vision[m.visionIndex] ?? this.current().route.visionModel;
           // Store null when the choice matches config, so a later config change
           // is picked up rather than shadowed by a stale explicit selection.
-          const text = bareId(chosen) === bareId(this.config.model) ? null : chosen;
+          // Endpoint zero is null for the same reason.
+          const text =
+            picked.endpoint === null && bareId(chosen) === bareId(this.config.model) ? null : chosen;
           const img =
             !visionChoice || bareId(visionChoice) === bareId(this.config.visionModel)
               ? null
               : visionChoice;
+          // Endpoint first: the model name is only meaningful on the endpoint
+          // that serves it, and the pair is set together or not at all.
+          this.current().setEndpoint(picked.endpoint);
           this.current().setModels(text, img);
+          const where = picked.endpoint ? ` on ${picked.endpoint}` : "";
           this.systemNote(
-            `model: ${bareId(chosen)}` +
+            `model: ${bareId(chosen)}${where}` +
               (visionChoice ? ` · images: ${bareId(visionChoice)}` : " · images: none") +
               (this.current().route.usingVision
                 ? "  (history has an image, so the image model answers)"
@@ -1369,6 +1392,18 @@ export class App {
     // Release the lock on the session we are leaving, now that we hold the new
     // one.
     if (leaving && leaving !== session) void leaving.release();
+    // Say so when the session was pinned to an endpoint that is no longer
+    // configured (see `endpoints.json`). It has fallen back to `CODA_*`, and
+    // continuing silently would mean talking to a different service than the
+    // transcript was written against. Reported here, once per open, rather than
+    // at every request.
+    if (session.route.endpointMissing) {
+      this.systemNote(
+        `endpoint "${session.route.endpoint}" is no longer configured; ` +
+          `this session is using the default endpoint (${bareId(session.route.textModel)}). ` +
+          `Open /model to pick another.`
+      );
+    }
     return true;
   }
 

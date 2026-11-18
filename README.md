@@ -555,12 +555,15 @@ when an endpoint cannot be reached, so the picker still works offline.
 ```
 Models  (↑/↓ text · ←/→ image · Enter select · Esc cancel)
 ──────────────────────────────────────────────────────────
-    deepseek-flash                     gemini-2.5-flash
-▸ ✓ deepseek-v4-pro                  ▸ gemini-3.6-flash
-    gemini-2.5-pro                     gemini-2.5-pro
+    deepseek-flash  [default]           gemini-2.5-flash
+▸ ✓ deepseek-v4-pro  [default]       ▸ gemini-3.6-flash
+    qwen3-coder  [openrouter]           gemini-2.5-pro
 ──────────────────────────────────────────────────────────
 images in history: requests go to gemini-3.6-flash · from model endpoint
 ```
+
+With a single endpoint the `[name]` tags are omitted; they appear once
+`endpoints.json` adds another (see [Several endpoints](#several-endpoints)).
 
 - **↑/↓** move between text models, **←/→** choose the image model, **Enter**
   applies the selection to this session, **Esc** cancels.
@@ -581,8 +584,42 @@ images in history: requests go to gemini-3.6-flash · from model endpoint
   name. When nothing image-capable exists the column is empty and ←/→ do
   nothing.
 
-The selection is held in memory for the session's lifetime; the configured
-`CODA_MODEL` / `CODA_VISION_MODEL` are what a new session starts from.
+The chosen endpoint is saved with the session and restored when it is reopened;
+a new session starts from the configured `CODA_*` endpoint. A session that
+names an endpoint since removed from `endpoints.json` falls back to the default
+endpoint and says so, rather than failing to open.
+
+### Several endpoints
+
+To keep more than one text endpoint available, list them in
+`~/.config/coda/endpoints.json`:
+
+```json
+{
+  "endpoints": [
+    { "name": "openrouter", "baseURL": "https://openrouter.ai/api/v1",
+      "model": "qwen/qwen3-coder", "apiKey": "openrouter" },
+    { "name": "local", "baseURL": "http://localhost:8080/v1",
+      "model": "qwen2.5-coder" }
+  ]
+}
+```
+
+- `apiKey` is the **name of a vault entry**, never a key itself — store it
+  first with `/secret set openrouter`. The value is read from the vault only
+  when that endpoint is selected, so no credential appears in this file, in a
+  session dump, or in an error message. Omit `apiKey` for a server that wants
+  no key (a local llama.cpp, say).
+- The `CODA_*` endpoint remains endpoint zero and needs no entry here. Rows are
+  shown in file order, the default first.
+- Every model a row serves appears in `/model` tagged with its endpoint, and is
+  only offered for the endpoint that serves it — the same rule that keeps a
+  vision model out of the text column.
+- If the file is malformed, or a row is missing `name`/`baseURL`/`model` or
+  repeats a name, `coda` warns, skips that row (`coda`'s warnings go to stderr)
+  and carries on with the rest.
+
+Set `CODA_ENDPOINTS_FILE` to read a different file.
 
 A line that begins with `/` but names no known command is **not** sent to the
 model. Instead `coda` reports `unknown command: …` in the transcript and leaves
@@ -598,6 +635,7 @@ own is exempt and is sent as ordinary text (e.g. a pasted absolute path).
 | `CODA_BASE_URL` | `https://api.deepseek.com` (also reads `DEEPSEEK_BASE_URL` / `OPENAI_BASE_URL`) |
 | `CODA_MODEL` | `deepseek-chat` (also reads `DEEPSEEK_MODEL` / `OPENAI_MODEL`) |
 | `CODA_SESSIONS_DIR` | `~/.coda/sessions` (also reads the older `DSC_SESSIONS_DIR`) |
+| `CODA_ENDPOINTS_FILE` | `~/.config/coda/endpoints.json` (extra text endpoints; see [Several endpoints](#several-endpoints)) |
 | `CODA_IMAGES_DIR` | `~/.coda/images` — cached copies of attached screenshots |
 | `CODA_MOUSE` | `on` — set to `off` to leave mouse selection to the terminal (see [Scrolling back](#scrolling-back)) |
 | `CODA_PARALLEL_TOOLS` | `on` — set to `off` to run tool calls strictly in the order the model requested them (see [Parallel tool calls](#parallel-tool-calls)) |
