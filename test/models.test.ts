@@ -126,6 +126,41 @@ assert.equal(bareId("deepseek-flash"), "deepseek-flash", "a bare id is unchanged
 
   assert.ok(asked.includes("https://text.example/v1/models"), "the text endpoint is queried");
   assert.ok(asked.includes("https://vision.example/v1/models"), "the vision endpoint is queried");
+
+  // A model the vision endpoint serves is *not* offered for text: the text
+  // endpoint rejects it (a Gemini id sent to a DeepSeek endpoint fails with
+  // "the supported API model names are ..."), which is how /model used to hand
+  // the user a session that broke on its next message.
+  const byId = new Map(cat.chat.map((c) => [c.id, c]));
+  assert.equal(byId.get("gemini-2.5-flash")?.text, false,
+    "a vision-only model must not be offered as the text model");
+  assert.equal(byId.get("deepseek-flash")?.text, true);
+  assert.equal(byId.get("deepseek-v4-pro")?.text, true);
+  assert.equal(byId.get("gemini-3.6-flash")?.vision, true,
+    "the configured vision model is still offered for images");
+  assert.equal(byId.get("deepseek-flash")?.vision, false,
+    "the text model is not offered for images");
+}
+
+// --- a vision model served on both endpoints is text-capable ---------------
+
+{
+  // Shared endpoints are a supported setup, so "served by the vision endpoint"
+  // must not on its own mean "cannot answer text".
+  const same = {
+    ...baseConfig,
+    visionBaseURL: baseConfig.baseURL,
+    visionApiKey: baseConfig.apiKey,
+  } as unknown as Config;
+  stubFetch({ "https://text.example/v1/models": ["deepseek-flash", "gemini-4-carbon"] });
+  const cat = await loadCatalog(same);
+  globalThis.fetch = realFetch;
+
+  const byId = new Map(cat.chat.map((c) => [c.id, c]));
+  assert.equal(byId.get("gemini-4-carbon")?.text, true,
+    "a model the shared endpoint lists can answer text");
+  assert.equal(byId.get("gemini-4-carbon")?.vision, true,
+    "and it accepts images too");
 }
 
 // --- unreachable endpoint falls back to config -----------------------------
@@ -148,6 +183,11 @@ assert.equal(bareId("deepseek-flash"), "deepseek-flash", "a bare id is unchanged
   );
   const vision = cat.chat.filter((c) => c.vision).map((c) => c.id);
   assert.ok(vision.includes("gemini-3.6-flash"), "vision is still known from config");
+  const byId = new Map(cat.chat.map((c) => [c.id, c]));
+  assert.equal(byId.get("deepseek-flash")?.text, true,
+    "the configured text model is offered for text while offline");
+  assert.equal(byId.get("gemini-3.6-flash")?.text, false,
+    "an unreachable text endpoint does not make the vision model a text choice");
 }
 
 // --- a single endpoint is queried once -------------------------------------

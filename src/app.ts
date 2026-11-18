@@ -13,7 +13,7 @@ import {
   loadInstructions,
   projectInstructionsPath,
 } from "./instructions.js";
-import type { ModelCatalog } from "./models.js";
+import type { ModelCatalog, ModelInfo } from "./models.js";
 import {
   deleteSecret,
   describe,
@@ -387,6 +387,17 @@ export class App {
     });
   }
 
+  /**
+   * The models the `/model` overlay offers as the *text* model.
+   *
+   * The catalogue also carries models only the vision endpoint serves (a Gemini
+   * id, say). Offering one here would select a model the text endpoint rejects
+   * with a 400 on the next message, so they are left to the image column.
+   */
+  private textChoices(catalogue: ModelCatalog): ModelInfo[] {
+    return catalogue.chat.filter((c) => c.text);
+  }
+
   /** Build the screen's view of the `/model` overlay from the app's state. */
   private modelPickerState(
     m: NonNullable<App["modelPicker"]>
@@ -399,7 +410,7 @@ export class App {
     const current = route.visionModel ? bareId(route.visionModel) : "";
     if (current && !vision.includes(current)) vision.push(current);
     return {
-      models: m.catalogue.chat.map((c) => ({ id: c.id, vision: c.vision })),
+      models: this.textChoices(m.catalogue).map((c) => ({ id: c.id, vision: c.vision })),
       index: m.index,
       selected: bareId(route.textModel),
       vision,
@@ -576,7 +587,7 @@ export class App {
    */
   private onModelPickerKey(k: Key): void {
     const m = this.modelPicker!;
-    const models = m.catalogue.chat;
+    const models = this.textChoices(m.catalogue);
     const vision = this.modelPickerState(m).vision;
 
     switch (k.type) {
@@ -647,7 +658,9 @@ export class App {
     const catalogue = await loadCatalog(this.config);
     const route = this.current().route;
     const current = bareId(route.textModel);
-    const idx = Math.max(0, catalogue.chat.findIndex((c) => c.id === current));
+    // Index into the same list the overlay draws, so the tick and the cursor
+    // cannot disagree about which rows exist.
+    const idx = Math.max(0, this.textChoices(catalogue).findIndex((c) => c.id === current));
 
     // Start the image cursor on the model actually in force, resolved against
     // the same list the overlay will draw (which may append the configured

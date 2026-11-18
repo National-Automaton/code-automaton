@@ -23,6 +23,16 @@ export interface ModelInfo {
   chat: boolean;
   /** True when this model accepts image parts in a chat message. */
   vision: boolean;
+  /**
+   * True when this model may answer a *text* request.
+   *
+   * Separate from `chat` because the two endpoints are separate services: the
+   * id `gemini-4-carbon` can answer a chat completion, but only on the vision
+   * endpoint, and sending it to the text endpoint fails with the provider's
+   * "supported API model names are ..." 400. Selecting it as the text model
+   * used to be possible and broke the session on the next message.
+   */
+  text: boolean;
 }
 
 export interface ModelCatalog {
@@ -175,6 +185,13 @@ async function fetchEndpoint(
  * When an endpoint cannot be reached its configured models are used instead, so
  * the picker always has something to show -- an offline machine must still be
  * able to see and reselect the model it is already running.
+ *
+ * Each id remembers which endpoint(s) listed it. A model is text-capable when
+ * the text endpoint serves it and vision-capable when the vision endpoint
+ * does, which is what stops a vision-only id being offered for text (see
+ * `ModelInfo.text`). When an endpoint could not be reached, its configured
+ * model is assumed to be served there, because that is the model the session
+ * is already running on it.
  */
 export async function loadCatalog(config: Config): Promise<ModelCatalog> {
   const sameEndpoint =
@@ -189,14 +206,31 @@ export async function loadCatalog(config: Config): Promise<ModelCatalog> {
   ]);
 
   const fetched = textList !== null || visionList !== null;
-  const ids = new Set<string>();
-  for (const id of [...(textList ?? []), ...(visionList ?? [])]) ids.add(bareId(id));
+
+  // Which endpoint served each id. `visionList` is null when both models share
+  // one endpoint, in which case that endpoint serves images too.
+  const textIds = new Set<string>();
+  const visionIds = new Set<string>();
+  for (const id of textList ?? []) textIds.add(bareId(id));
+  if (sameEndpoint) {
+    for (const id of textIds) visionIds.add(id);
+  }
+  for (const id of visionList ?? []) visionIds.add(bareId(id));
 
   // Config values are always included, even when a list arrived: the configured
   // model may be an alias the endpoint does not list (or a local name), and
-  // dropping it from the picker would hide the model currently in use.
-  ids.add(bareId(config.model));
-  if (config.visionModel) ids.add(bareId(config.visionModel));
+  // dropping it from the picker would hide the model currently in use. A model
+  // is offered for a role when it was listed by that endpoint or is that
+  // endpoint's configured model.
+  const textModel = bareId(config.model);
+  const visionModel = config.visionModel ? bareId(config.visionModel) : "";
+  textIds.add(textModel);
+  if (visionModel) visionIds.add(visionModel);
+  // Without a configured vision model the text model is the image route (that
+  // is what `Config`'s fallback does), so it is offered for images too.
+  if (!visionModel) visionIds.add(textModel);
+
+  const ids = new Set<string>([...textIds, ...visionIds]);
 
   const chat = [...ids]
     .filter((id) => isChatModel(id))
@@ -204,13 +238,9 @@ export async function loadCatalog(config: Config): Promise<ModelCatalog> {
       id,
       chat: true,
       // The configured vision model is trusted regardless of its name; every
-      // other model is judged by name (see `supportsImages`). Without a
-      // configured vision model the text model is the image route by default
-      // (that is what `Config`'s fallback does), so it is trusted too.
-      vision:
-        (id === bareId(config.visionModel) && !!config.visionModel) ||
-        (!config.visionModel && id === bareId(config.model)) ||
-        supportsImages(id),
+      // other model is judged by name (see `supportsImages`).
+      vision: visionIds.has(id) && (id === visionModel || supportsImages(id)),
+      text: textIds.has(id),
     }));
 
   return {
