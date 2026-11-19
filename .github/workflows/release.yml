@@ -171,6 +171,17 @@ jobs:
           #
           # A bump PR is titled with just the version number, which makes it
           # identifiable and safe to drop: a normal PR says what it changes.
+          # A curated set of notes wins when one exists. The generated list is
+          # accurate but flat: it names every PR in merge order, so a release
+          # with real features in it reads like a list of routine fixes. Writing
+          # the page inside the version-bump PR does not work either -- this step
+          # creates the release from scratch and ignores any body already set.
+          #
+          # So: .github/release-notes/<tag>.md, if present, is the page, with the
+          # generated list appended under a heading as the full changelog. Absent,
+          # behaviour is exactly as before.
+          CURATED=".github/release-notes/${GITHUB_REF_NAME}.md"
+
           PREVIOUS_TAG=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo "")
           if [ -n "$PREVIOUS_TAG" ]; then
             BODY=$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
@@ -207,6 +218,19 @@ jobs:
           printf '%s\n' "$BODY" \
             | sed "1a\\\n${NPM_NOTE}\\n" \
             > /tmp/release-notes.md
+
+          # With curated notes, they lead and the generated list follows as the
+          # full changelog, dropped to h3 so it sits under the curated headings.
+          if [ -f "$CURATED" ]; then
+            {
+              printf '%s\n' "$NPM_NOTE" ""
+              cat "$CURATED"
+              printf '\n---\n\n### Every change in this release\n\n'
+              printf '%s\n' "$BODY" \
+                | grep -v '^## What' \
+                | sed 's/^\* /- /'
+            } > /tmp/release-notes.md
+          fi
 
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
