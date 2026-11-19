@@ -309,8 +309,38 @@ function wrapHard(text: string, width: number): string[] {
 }
 
 export class Screen {
-  private cols = stdout.columns || 80;
-  private rows = stdout.rows || 24;
+  /**
+   * Terminal size, re-read on every render rather than cached at construction.
+   *
+   * `stdout.columns` is not reliably populated when the process starts -- the
+   * tty is set up around the same time -- so a value captured in the
+   * constructor can be the 80x24 fallback while the terminal is really
+   * 120x64. The frame was then laid out for 24 rows in a 64-row window: the
+   * input line and its caret sat a third of the way down the screen, with a
+   * second cursor at the bottom.
+   *
+   * Reading at paint time makes the first frame correct however late the size
+   * becomes available, and needs no resize event to fix itself. A size set
+   * explicitly (`resizeHandler`, tests) is kept, because `stdout` may not
+   * reflect it.
+   */
+  private sizeOverride: { cols: number; rows: number } | null = null;
+  /** The size the last resize event reported, so a repeat can be ignored. */
+  private lastAppliedSize: { cols: number; rows: number } | null = null;
+
+  get cols(): number {
+    return this.sizeOverride?.cols ?? (stdout.columns || 80);
+  }
+  set cols(n: number) {
+    this.sizeOverride = { cols: n, rows: this.sizeOverride?.rows ?? this.rows };
+  }
+
+  get rows(): number {
+    return this.sizeOverride?.rows ?? (stdout.rows || 24);
+  }
+  set rows(n: number) {
+    this.sizeOverride = { cols: this.sizeOverride?.cols ?? this.cols, rows: n };
+  }
   /** Total transcript lines from the last render, for scroll clamping. */
   private lastTotalLines = 0;
   /** Rows actually visible for the transcript in the last render. */
@@ -384,9 +414,14 @@ export class Screen {
   private resizeHandler = () => {
     const cols = stdout.columns || 80;
     const rows = stdout.rows || 24;
-    if (cols === this.cols && rows === this.rows) return;
-    this.cols = cols;
-    this.rows = rows;
+    // A resize event arrives *after* the terminal has already changed
+    // `stdout`, so the previous size cannot be re-read from it -- it is
+    // remembered here instead. The first event always wins, because there is
+    // nothing remembered yet.
+    const applied = this.lastAppliedSize;
+    if (applied && cols === applied.cols && rows === applied.rows) return;
+    this.lastAppliedSize = { cols, rows };
+    this.sizeOverride = { cols, rows };
     // The owner repaints; `draw()` homes the cursor and repaints from row 0,
     // and the repaint begins with CLEAR so no row of the old frame survives.
     this.onResize?.();
@@ -485,7 +520,11 @@ export class Screen {
    * `version` is shown after the brand in the header. It is passed in rather
    * than read from package.json here so the renderer stays free of file I/O.
    */
-  constructor(private mouse = true, private version = "") {}
+  constructor(private mouse = true, private version = "") {
+    // Deliberately *not* seeded from `stdout`: at construction the tty may not
+    // be set up yet, so a seed would freeze the 80x24 fallback in place. See
+    // the `cols`/`rows` getters, which read the terminal at paint time.
+  }
 
   /**
    * Forget the picker's scroll position so the next frame starts at the top.
