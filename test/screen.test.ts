@@ -957,6 +957,36 @@ for (const size of SIZES) {
   assert.ok(frame.paints >= 1, "the frame still paints");
 }
 
+// On the highlighted row, the image cursor is marked so it stays visible.
+//
+// That row is drawn in reverse video, which swallowed the plain `▸` -- the mark
+// was nearly invisible exactly when the user was looking at it. The image
+// cursor is now bold inside the reversed block, and the *text* cursor on the
+// same row must stay plain, or the two become indistinguishable.
+{
+  const state: any = modelState();
+  state.modelPicker.models = [
+    { id: "deepseek-chat", vision: false, endpoint: null },
+    { id: "grok-4", vision: false, endpoint: "grok" },
+  ];
+  state.modelPicker.index = 0;                 // highlight row 0...
+  state.modelPicker.visionIndex = 0;           // ...which also carries the image cursor
+  state.modelPicker.vision = ["gemini-a", "gemini-b"];
+  state.modelPicker.selected = "deepseek-chat";
+
+  const screen = screenAt(100, 30);
+  const out: string[] = ["h", ""];
+  (screen as any).renderModelPicker(state.modelPicker, out, 100, 30);
+  const active = out.find((r: string) => r.includes("deepseek-chat"))!;
+
+  assert.ok(active.includes("\x1b[7m"), "the row is still highlighted");
+  assert.ok(active.includes("\x1b[1m▸"), "the image cursor is bold inside the highlight");
+  // Exactly one bold mark: the image one. The text cursor must not be bold.
+  assert.equal((active.match(/\x1b\[1m▸/g) ?? []).length, 1,
+    `only the image cursor is emphasised, got: ${active}`);
+  assert.ok(!/\x1b\[1m▸ ✓/.test(active), "the text cursor is not emphasised");
+}
+
 // The image keys are only advertised when they can act.
 //
 // The image route belongs to the default endpoint, so on a pinned endpoint the
