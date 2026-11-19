@@ -1093,8 +1093,20 @@ export class Screen {
         right.startsWith("▸ ") ? label + BOLD + rightText + RESET : label + DIM + rightText + RESET;
 
       if (active) {
+        // The highlighted row is reverse video, which swallows a plain `▸` --
+        // the mark on the image cursor became nearly invisible exactly when the
+        // user was looking at it. Highlighting the mark itself (bold inside the
+        // reversed block) keeps the two cursors tellable apart on the row the
+        // eye is already on.
         const plain = (label + rightText).slice(0, width - 1).padEnd(Math.max(1, width - 1));
-        out.push(REVERSE + plain + RESET);
+        // The *last* `▸` is the image column's -- the first belongs to the text
+        // column and is already the highlight's own marker.
+        const at = right.startsWith("▸ ") ? plain.lastIndexOf("▸") : -1;
+        const marked =
+          at === -1
+            ? plain
+            : plain.slice(0, at) + BOLD + "▸" + RESET + REVERSE + plain.slice(at + 1);
+        out.push(REVERSE + marked + RESET);
       } else {
         out.push(right ? styled : label);
       }
