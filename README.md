@@ -695,10 +695,22 @@ protected, so the version bump must land through a pull request — a direct
 the bump is merged would point at a commit that is not on the branch. The order
 below keeps the two consistent:
 
+Release notes are generated from the pull requests merged since the last tag,
+so they are complete but flat: one bullet per PR, in merge order. To explain a
+release instead of listing it, add `.github/release-notes/<tag>.md` (for example
+`.github/release-notes/v1.14.0.md`) **on the release branch, before it merges**.
+The workflow uses it as the page and appends the generated list beneath it as
+the full changelog.
+
+That file must be in the commit the tag points at, not merely on `main`
+afterwards: CI checks out the tag. A tag pushed before its notes merged ships
+with the generated page, and fixing that needs `gh release edit`.
+
 ```bash
-# 1. Bump the version on a branch (npm version also builds dist/).
-npm version patch                 # or minor / major — commits 1.4.3 + tags locally
+# 1. Bump the version on a branch, and add the notes there.
 git switch -c chore/release-$(node -p "require('./package.json').version")
+# ... write .github/release-notes/v$(node -p "require('./package.json').version").md
+npm version patch                 # or minor / major — commits 1.4.3 + tags locally
 git push -u origin chore/release-$(node -p "require('./package.json').version")
 
 # 2. Open a PR and merge it. Do NOT squash: that rewrites the commit the
