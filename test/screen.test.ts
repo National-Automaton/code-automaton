@@ -878,6 +878,35 @@ for (const size of SIZES) {
   );
 }
 
+// The size is read at paint time, not cached at construction.
+//
+// `stdout.columns` is not reliably populated when the process starts, so a
+// value captured in the constructor can be the 80x24 fallback while the
+// terminal is really 120x64. The frame was then laid out for 24 rows in a
+// 64-row window: the input line and its caret sat a third of the way down, with
+// a second cursor at the bottom.
+{
+  const stdout = process.stdout as unknown as { columns: number; rows: number };
+  const savedCols = stdout.columns;
+  const savedRows = stdout.rows;
+
+  // Construct while the terminal size is unavailable, as at start-up.
+  delete (stdout as any).columns;
+  delete (stdout as any).rows;
+  const screen = new Screen(false, "1.6.2");
+
+  // ...then the tty settles, with no resize event to announce it.
+  stdout.columns = 120;
+  stdout.rows = 64;
+  try {
+    assert.equal(screen.width, 120, "the width is read at paint time");
+    assert.equal(screen.height, 64, "the height is read at paint time");
+  } finally {
+    stdout.columns = savedCols;
+    stdout.rows = savedRows;
+  }
+}
+
 // --- a resize repaints, and no stale rows survive -------------------------
 //
 // Windows Terminal reports its real size shortly after the first frame is
