@@ -156,10 +156,67 @@ export function bareId(id: string): string {
 const FETCH_TIMEOUT_MS = 5_000;
 
 /** Ask one endpoint what it serves. Returns null on any failure. */
+export interface ListedModel {
+  id: string;
+  /**
+   * Image support as the endpoint *declares* it, or null when it says nothing.
+   *
+   * Null is not "no": it means the endpoint did not report capabilities, so the
+   * caller must fall back to judging by name. Conflating the two would hide a
+   * vision model behind a provider that simply omits metadata.
+   */
+  vision: boolean | null;
+}
+
+/**
+ * Read one model entry's declared image support.
+ *
+ * Three shapes are in use among the providers tested, and each is checked
+ * before the next:
+ *
+ *  - `input_modalities: ["text", "image"]` (DeepSeek, and the OpenAI-compatible
+ *    convention). Explicit, and it distinguishes models on the same endpoint --
+ *    deepseek-flash takes images, deepseek-v4-pro does not.
+ *  - `architecture.input_modalities` / `architecture.modality`, which some
+ *    gateways use instead.
+ *  - `prompt_image_token_price` (x.ai). A model is priced for image *input*
+ *    exactly when it accepts images; every chat model there has it and the
+ *    image-*generation* models have no prices at all. A price is not a
+ *    statement of capability, so this is only a proxy -- but on the endpoint it
+ *    was checked against, no chat model lacked it.
+ *
+ * Anything else returns null, and the caller falls back to the name heuristics.
+ */
+export function declaredVision(entry: any): boolean | null {
+  const modalities = (v: any): boolean | null => {
+    if (!Array.isArray(v)) return null;
+    const lc = v.map((m: any) => String(m).toLowerCase());
+    if (lc.includes("image") || lc.includes("vision")) return true;
+    // A list that mentions only text is a genuine "no"; one that mentions some
+    // other input (audio-only, say) says nothing about images.
+    return lc.includes("text") ? false : null;
+  };
+
+  const direct = modalities(entry?.input_modalities);
+  if (direct !== null) return direct;
+
+  const arch =
+    modalities(entry?.architecture?.input_modalities) ??
+    modalities(entry?.architecture?.modality);
+  if (arch !== null) return arch;
+
+  // Image *input* pricing. Zero would be an odd way to say "free", so any
+  // numeric value counts as present.
+  const price = entry?.prompt_image_token_price;
+  if (typeof price === "number") return price >= 0 ? true : null;
+
+  return null;
+}
+
 async function fetchEndpoint(
   baseURL: string,
   apiKey: string
-): Promise<string[] | null> {
+): Promise<ListedModel[] | null> {
   const url = baseURL.replace(/\/+$/, "") + "/models";
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
@@ -173,8 +230,8 @@ async function fetchEndpoint(
     const data = Array.isArray(body?.data) ? body.data : null;
     if (!data) return null;
     return data
-      .map((m: any) => (typeof m?.id === "string" ? m.id : null))
-      .filter((id: string | null): id is string => id !== null);
+      .filter((m: any) => typeof m?.id === "string")
+      .map((m: any) => ({ id: m.id, vision: declaredVision(m) }));
   } catch {
     return null;
   } finally {
@@ -216,7 +273,7 @@ export async function loadCatalog(config: Config): Promise<ModelCatalog> {
   const [textList, visionList, ...extraLists] = await Promise.all([
     fetchEndpoint(config.baseURL, config.apiKey),
     sameEndpoint
-      ? Promise.resolve<string[] | null>(null)
+      ? Promise.resolve<ListedModel[] | null>(null)
       : fetchEndpoint(config.visionBaseURL, config.visionApiKey),
     // A key that is not in the vault yet still yields a listable endpoint: the
     // models are known from `endpoints.json` even when the key is missing, so
@@ -243,15 +300,35 @@ export async function loadCatalog(config: Config): Promise<ModelCatalog> {
   const addText = (endpoint: string | null, id: string) => textKeys.add(keyOf(endpoint, bareId(id)));
   const addVision = (endpoint: string | null, id: string) => visionKeys.add(keyOf(endpoint, bareId(id)));
 
-  for (const id of textList ?? []) addText(null, id);
+  /*
+   * Image support as each endpoint *declared* it, keyed the same way.
+   *
+   * This is what lets a provider say which of its own models take images,
+   * instead of coda guessing from the name -- `grok-4` matched none of
+   * `VISION_MARKERS`, so no x.ai model could ever appear in the image column
+   * however capable it was (issue #88). A model with no declaration is left
+   * out of this set entirely and judged by name, as before.
+   */
+  const declared = new Map<string, boolean>();
+  const declare = (endpoint: string | null, models: ListedModel[] | null) => {
+    for (const m of models ?? []) {
+      if (m.vision === null) continue;
+      declared.set(keyOf(endpoint, bareId(m.id)), m.vision);
+    }
+  };
+  declare(null, textList);
+  declare(null, visionList);
+  endpoints.forEach((endpoint, i) => declare(endpoint.name, extraLists[i] ?? null));
+
+  for (const m of textList ?? []) addText(null, m.id);
   if (sameEndpoint) {
     // One service serves both roles, so every text id is an image id too.
-    for (const id of textList ?? []) addVision(null, id);
+    for (const m of textList ?? []) addVision(null, m.id);
   }
-  for (const id of visionList ?? []) addVision(null, id);
+  for (const m of visionList ?? []) addVision(null, m.id);
 
   endpoints.forEach((endpoint, i) => {
-    for (const id of extraLists[i] ?? []) addText(endpoint.name, id);
+    for (const m of extraLists[i] ?? []) addText(endpoint.name, m.id);
   });
 
   // Config values are always included, even when a list arrived: the configured
@@ -284,17 +361,23 @@ export async function loadCatalog(config: Config): Promise<ModelCatalog> {
         chat: true,
         // The configured vision model is trusted regardless of its name; every
         // other model is judged by name (see `supportsImages`).
+        // A declaration from the endpoint outranks the name heuristics: the
+        // provider knows its own models. `visionKeys` still gates it, so a
+        // model the vision endpoint does not serve cannot leak into the image
+        // column from another endpoint's declaration.
         vision:
           visionKeys.has(k) &&
-          (endpoint === null ? id === visionModel || supportsImages(id) : supportsImages(id)),
+          (endpoint === null && id === visionModel
+            ? true
+            : (declared.get(k) ?? supportsImages(id))),
         text: textKeys.has(k),
         endpoint,
       });
     }
   };
 
-  emit(null, [...new Set([...(textList ?? []).map(bareId), ...(visionList ?? []).map(bareId), textModel, visionModel].filter(Boolean))]);
-  endpoints.forEach((endpoint, i) => emit(endpoint.name, [...(extraLists[i] ?? []), endpoint.model]));
+  emit(null, [...new Set([...(textList ?? []).map((m) => m.id), ...(visionList ?? []).map((m) => m.id), textModel, visionModel].filter(Boolean))]);
+  endpoints.forEach((endpoint, i) => emit(endpoint.name, [...(extraLists[i] ?? []).map((m) => m.id), endpoint.model]));
 
   return {
     chat,
