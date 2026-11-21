@@ -60,6 +60,102 @@ export class RequestRejectedError extends Error {
  * are upstream failures the retry helper already handles, and the turn is
  * genuinely in doubt rather than plainly refused.
  */
+/**
+ * How long a 429 or 503 asks to be waited out, in milliseconds.
+ *
+ * Providers say so in one of three places and none is universal:
+ *
+ *  - `Retry-After`, the standard header, in seconds (or an HTTP date).
+ *  - `x-ratelimit-reset-*` / `x-ratelimit-reset`, also seconds.
+ *  - The body. Gemini's `RESOURCE_EXHAUSTED` message spells out both the quota
+ *    window ("per minute") and a concrete delay ("Please retry in 30.5s"), and
+ *    its free tier's per-minute limits are what a burst of screenshot questions
+ *    hits.
+ *
+ * Returns null when the provider says nothing, in which case the caller falls
+ * back to its own backoff. Capped by the caller, not here.
+ */
+/**
+ * The longest coda will wait inside a turn.
+ *
+ * A provider can ask for minutes; holding a turn open that long looks like a
+ * hang, and the user cannot cancel a sleep. Past this the request fails with an
+ * explanation instead, which is honest and immediate.
+ */
+const MAX_RETRY_WAIT_MS = 30_000;
+
+export function retryHintMs(err: any): number | null {
+  const headers = err?.headers ?? err?.response?.headers;
+  const header = (name: string): string | null => {
+    try {
+      if (!headers) return null;
+      // The SDK's Headers mirrors the fetch one, but a plain object is possible
+      // too; both support get() or a lower-cased index.
+      if (typeof headers.get === "function") return headers.get(name);
+      return headers[name] ?? headers[name.toLowerCase()] ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const seconds = (v: string | null): number | null => {
+    if (!v) return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n * 1000 : null;
+  };
+
+  const after = seconds(header("retry-after"));
+  if (after !== null) return after;
+
+  for (const name of [
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-reset-tokens",
+    "x-ratelimit-reset",
+  ]) {
+    const ms = seconds(header(name));
+    if (ms !== null) return ms;
+  }
+
+  // The body: "Please retry in 30.5s" is the clearest signal there is.
+  const message = String(err?.message ?? "");
+  const inMessage = /retry in ([0-9]+(?:\.[0-9]+)?)\s*s/i.exec(message);
+  if (inMessage) {
+    const n = Number(inMessage[1]);
+    if (Number.isFinite(n)) return Math.round(n * 1000);
+  }
+  return null;
+}
+
+/**
+ * A one-line explanation of *why* a request was refused, for the user.
+ *
+ * A bare 429 reads as a billing problem and sends people to check their
+ * balance; Gemini's per-minute rate limit is neither billing nor an outage. The
+ * provider usually says which it is, so say it back rather than making them
+ * guess.
+ */
+export function explainRejection(err: any): string {
+  const status = err?.status ?? err?.response?.status;
+  const message = String(err?.message ?? "").trim();
+  if (status === 429) {
+    const hint = retryHintMs(err);
+    const when = hint !== null ? ` Retry in about ${Math.ceil(hint / 1000)}s.` : "";
+    // Providers are inconsistent here: Gemini says "you exceeded your current
+    // quota" for a per-minute *rate* limit, so the word "quota" proves nothing.
+    // Only billing-shaped words are taken as billing, and a rate hint
+    // ("per minute", "rate", "retry in 30s") overrides them.
+    const billing = /billing|credit balance|insufficient|payment|paid plan/i.test(message);
+    const rateish = /rate|per minute|per day|retry in|too many requests/i.test(message);
+    const isBilling = billing && !rateish;
+    return (
+      (isBilling ? "The provider reports a quota or billing limit." : "Rate limited by the provider.") +
+      when +
+      (message ? `\n  ${message}` : "")
+    );
+  }
+  return message;
+}
+
 export function isRequestRejection(err: any): boolean {
   if (err instanceof RequestRejectedError) return true;
   const status = err?.status ?? err?.response?.status;
@@ -1452,7 +1548,9 @@ export class Agent {
     model: string,
     emit: (ev: AgentEvent) => void
   ) {
-    const attempts = 3;
+    // Four tries, since a per-minute window needs the waits below to add up to
+    // something. Still bounded: a turn must not hang on a stuck provider.
+    const attempts = 4;
     for (let attempt = 1; ; attempt++) {
       try {
         return await client.chat.completions.create({
@@ -1481,12 +1579,32 @@ export class Agent {
               isMalformedHistoryError(err)
             );
           }
+          // Out of retries on a transient failure: say what it was. A bare 429
+          // reads as a billing problem and sends people to check their balance,
+          // when the provider almost always said "per-minute rate limit, retry
+          // in 30s" in its own message.
+          if (transient) {
+            const why = explainRejection(err);
+            const wrapped = new Error(
+              `${model} failed after ${attempts} attempts.\n  ${why}`,
+              { cause: err }
+            ) as any;
+            wrapped.status = status;
+            throw wrapped;
+          }
           throw err;
         }
-        const waitMs = 500 * 2 ** (attempt - 1);
+        // Prefer the provider's own guidance. The old backoff was 0.5s then
+        // 1s, which cannot outlast the per-minute quota window a 429 usually
+        // means -- so the retries were decorative and the user got a raw 429.
+        const hint = retryHintMs(err);
+        const backoff = [1_000, 4_000, 10_000][attempt - 1] ?? 10_000;
+        const waitMs = Math.min(hint ?? backoff, MAX_RETRY_WAIT_MS);
         emit({
           type: "text",
-          text: `\n[${model} returned ${status}, retrying in ${waitMs / 1000}s (${attempt}/${attempts - 1})]\n`,
+          text:
+            `\n[${model} returned ${status}, retrying in ${Math.round(waitMs / 1000)}s ` +
+            `(${attempt}/${attempts - 1})]\n`,
         });
         await new Promise((r) => setTimeout(r, waitMs));
       }

@@ -131,6 +131,26 @@ independent of streaming: a reply that is still arriving keeps appending at the
 tail without yanking you back down, so you can read earlier output while the
 model is still writing.
 
+### Rate limits
+
+A `429` from a provider is usually a **rate** limit, not a billing problem — and
+the two look identical if you only show the status code. Coda retries with the
+delay the provider asks for (`Retry-After`, `x-ratelimit-reset-*`, or the
+"retry in 30.5s" in Gemini's own message), backing off 1s → 4s → 10s when it
+says nothing, capped at 30s so a turn cannot appear to hang.
+
+When the retries run out, the message says which it was:
+
+```
+error: gemini-3.6-flash failed after 4 attempts.
+  Rate limited by the provider. Retry in about 31s.
+  You exceeded your current quota. Please retry in 30.5s.
+```
+
+"Quota" in a provider's wording does not imply money: Gemini uses it for
+per-minute limits too. Coda only says "billing" when the provider mentions
+billing, a credit balance, or payment.
+
 ### Token usage
 
 Each assistant reply records what the provider said it cost, in
