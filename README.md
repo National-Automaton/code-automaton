@@ -590,6 +590,43 @@ model has finished writing:
 - **Output is scrubbed.** A child that echoes its credential still produces a
   redacted tool result.
 
+#### Logging in: `run_interactive`
+
+Some commands need the terminal itself — `gh auth login`, `aws sso login`,
+`gcloud auth login`, `docker login`. They prompt with arrow keys, open a
+browser, print a code. Coda's tools spawn children without a TTY, so those
+commands could not run at all.
+
+`run_interactive` hands your terminal to the command:
+
+```
+Hand the terminal to this command until it exits?
+  gh auth login
+  coda stops drawing while it runs; your keystrokes go to it.
+run this command?   y = once · a = always · n / Esc = no
+```
+
+- **Approved every time, per call.** There is no list of blessed commands to
+  keep up to date — that would need a code change per new tool, and an entry
+  approved once could be re-run later without asking.
+- **Coda suspends**: mouse reporting and paste are switched off and the terminal
+  returns to cooked mode, so the child gets a real TTY. The screen is redrawn
+  when it exits, and its output stays in the terminal's scrollback.
+- **You see the exit status, not the output.** The child writes straight to the
+  screen, so coda never captures it — and a login prints a URL and sometimes a
+  one-time code, which has no business in a transcript that is saved and
+  re-sent as history.
+- **Ctrl+C stops the command, not coda** while it has the terminal.
+- **Credentials are refused.** A known secret, or a `{{secret:NAME}}`
+  placeholder, is rejected: substitution and output redaction belong to
+  `use_secret`, and an interactive child's output is not redacted.
+- **Exclusive.** Refused while another session is still mid-turn, because that
+  session repaints the frame and would paint over the child's prompt.
+
+A command that never exits (`npm run dev`) is not handled yet: the handover
+waits for the process to end, so there is no way to say "it is running, carry
+on".
+
 #### Why `bash` cannot see vault credentials
 
 A command run through the plain `bash` tool inherits `coda`'s own environment,

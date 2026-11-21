@@ -1,4 +1,6 @@
+import { spawn } from "node:child_process";
 import { Config, endpointsFile, saveEndpoints } from "./config.js";
+import type { ToolResult } from "./tools.js";
 import { Key, KeyReader } from "./keys.js";
 import { LineBuffer, PromptRecall } from "./linebuffer.js";
 import type { RecalledPrompt } from "./linebuffer.js";
@@ -208,6 +210,17 @@ export class App {
    * Left/Right. The selection is only committed on Enter, so Esc leaves the
    * session's routing exactly as it was -- arrows move a draft, not the app.
    */
+  /**
+   * True while a child owns the terminal.
+   *
+   * Nothing else may draw or prompt during that time: the child is using the
+   * screen, and a prompt written into it would be answered by keystrokes that
+   * are going somewhere else entirely.
+   */
+  private handedOver = false;
+  /** The interactive child, so Ctrl+C can kill it rather than coda. */
+  private handoverChild: ReturnType<typeof spawn> | null = null;
+
   private modelPicker: {
     catalogue: ModelCatalog;
     index: number;
@@ -274,7 +287,18 @@ export class App {
       setTimeout(() => process.exit(0), 500).unref();
     };
     process.once("SIGTERM", flushAndExit);
-    process.once("SIGINT", flushAndExit);
+    // Ctrl+C normally quits. While a child owns the terminal it means "stop
+    // *that*", not "quit coda": the child is what the user is looking at, and
+    // killing the whole session because a login was mis-typed would be
+    // catastrophic. The listener stays registered (`.on`, not `.once`) so it is
+    // still there after a handover ends.
+    process.on("SIGINT", () => {
+      if (this.handoverChild) {
+        this.handoverChild.kill("SIGINT");
+        return;
+      }
+      flushAndExit();
+    });
     process.once("exit", cleanup);
 
     this.render();
@@ -851,6 +875,7 @@ export class App {
     label: string,
     hidden: boolean
   ): Promise<string | null> {
+    if (this.handedOver) return Promise.resolve(null);
     return new Promise((resolve) => {
       this.secretPrompt = {
         name,
@@ -1137,6 +1162,11 @@ export class App {
     summary: string,
     secrets: string[]
   ): Promise<"yes" | "no" | "always"> {
+    if (this.handedOver) {
+      // The screen belongs to the child; a prompt drawn now would be answered
+      // by keystrokes going somewhere else. Refuse rather than corrupt.
+      return Promise.resolve("no");
+    }
     return new Promise((resolve) => {
       this.approval = { summary, secrets, resolve };
       this.requestRender();
@@ -2228,7 +2258,8 @@ export class App {
         () => this.requestRender(),
         images,
         (summary, secrets) => this.askApproval(summary, secrets),
-        (name, label, hidden) => this.askSecretInput(name, label, hidden)
+        (name, label, hidden) => this.askSecretInput(name, label, hidden),
+        (argv) => this.handOverTerminal(argv)
       ).then((res) => this.afterTurn(res))
         .catch(() => {});
     }
@@ -2370,6 +2401,93 @@ export class App {
         ? "image cache: nothing to remove"
         : `image cache: removed ${removed.length} unused image${removed.length === 1 ? "" : "s"}`
     );
+  }
+
+  /**
+   * Hand the terminal to an interactive command until it exits.
+   *
+   * Stops coda drawing and puts the terminal back in cooked mode, so the child
+   * gets a real TTY: that is the whole point -- `gh auth login` and its like
+   * prompt, open a browser and print a code, and all of that needs a terminal
+   * that is not being redrawn underneath it.
+   *
+   * Restoring is unconditional. A child that throws, or a process that dies,
+   * must not leave the user in a raw-mode terminal with no prompt, which is far
+   * worse than a failed login.
+   *
+   * The result carries the exit status and nothing else. The child wrote
+   * straight to the screen, so coda never saw what it printed -- and a login
+   * prints a URL and sometimes a one-time code, which has no business in a
+   * transcript that is saved and re-sent as history.
+   */
+  private async handOverTerminal(argv: string[]): Promise<ToolResult> {
+    // Exclusive: another session's turn calls requestRender() on every chunk,
+    // which redraws the whole frame from the active session and would paint
+    // over the child's prompt. Refusing is honest; suspending rendering
+    // globally would silently swallow the other session's output instead.
+    const busy = this.sessions.filter(
+      (s) => s !== this.current() && s.status === "thinking"
+    );
+    if (busy.length) {
+      return {
+        ok: false,
+        output:
+          `run_interactive: ${busy.length} other session${busy.length > 1 ? "s are" : " is"} ` +
+          `still running. Wait for ${busy.length > 1 ? "them" : "it"} to finish, then retry.`,
+      };
+    }
+
+    this.systemNote(
+      `handing the terminal to: ${argv.join(" ")}\n` +
+        "  coda is suspended until it exits; press Ctrl+C there to abort."
+    );
+
+    // Suspended for the duration, so any prompt that tries to open meanwhile is
+    // refused rather than drawn into a terminal the child owns.
+    this.handedOver = true;
+    this.screen.stop();
+    this.keys.stop();
+
+    let code: number | null = null;
+    let failure: string | null = null;
+    try {
+      code = await new Promise<number | null>((resolve) => {
+        const child = spawn(argv[0], argv.slice(1), {
+          cwd: process.cwd(),
+          shell: false,
+          // Inherited outright, which is what makes it a terminal rather than a
+          // pipe: the child draws on this screen.
+          stdio: "inherit",
+        });
+        this.handoverChild = child;
+        child.on("error", (err: any) => {
+          failure = err?.message ?? String(err);
+          resolve(null);
+        });
+        child.on("exit", (c) => resolve(c));
+      });
+    } finally {
+      this.handoverChild = null;
+      this.handedOver = false;
+      // Back to coda's own modes, then repaint from scratch: the child's output
+      // overwrote the frame, and `draw()` begins with an erase, so the screen is
+      // clean. The login output stays in the terminal's scrollback.
+      this.screen.start();
+      this.keys.start();
+      this.requestRender();
+    }
+
+    if (failure) {
+      return { ok: false, output: `run_interactive: could not start: ${failure}` };
+    }
+    return {
+      ok: code === 0,
+      output:
+        code === 0
+          ? `ran interactively and exited 0. Its output went to the terminal and is ` +
+            `not captured; read the screen if you need it.`
+          : `ran interactively and exited ${code}.`,
+    };
   }
 
   private quit(): void {
