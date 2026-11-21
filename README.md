@@ -552,11 +552,25 @@ model has finished writing:
 
 - **No shell.** The command is a program and arguments, run with `spawn` and
   `shell: false`, so a substituted value cannot be re-parsed as shell syntax.
-- **Never in `argv` when it can be avoided.** `stdin` and `secret` are available
-  for programs that read a password from their input, which keeps the value out
-  of `ps` entirely. A value that reaches the argument list *is* briefly visible
-  in the process table — that is a limitation of programs that only accept
-  credentials as arguments, not something the tool can hide.
+- **Never in `argv` when it can be avoided.** `stdin`, `secret` and `env` are
+  available for programs that read a password from their input or their
+  environment, which keeps the value out of `ps` entirely. A value that reaches
+  the argument list *is* briefly visible in the process table — that is a
+  limitation of programs that only accept credentials as arguments, not
+  something the tool can hide.
+- **Environment variables**, for programs that read a token from the
+  environment rather than from stdin (`gh`, `curl -u`, anything using
+  `$TOKEN`). Values may hold a placeholder, and a literal secret is refused
+  here too:
+
+  ```jsonc
+  { "command": ["gh", "pr", "create", "--fill"],
+    "env": { "GH_TOKEN": "{{secret:github-token}}" } }
+  ```
+
+  The value is merged over the inherited environment (the child still gets
+  `PATH` and `HOME`) and passed with `shell: false`, so `$` and backticks in a
+  credential stay literal instead of expanding.
 - **Refuses literal secrets.** If the command contains a known value as written,
   the call fails and the model is told to use a placeholder.
 - **Every use is confirmed.** The prompt names the secret and the command as
@@ -575,6 +589,26 @@ model has finished writing:
   approve another, and a new session starts over.
 - **Output is scrubbed.** A child that echoes its credential still produces a
   redacted tool result.
+
+#### Why `bash` cannot see vault credentials
+
+A command run through the plain `bash` tool inherits `coda`'s own environment,
+and the vault is **not** in it: secrets are files under
+`~/.config/coda/secrets/` (mode 600) and are never exported. So inside `bash`:
+
+```
+$ echo "$MY_TOKEN"        # empty
+$ secret-tool lookup …    # nothing registered: the vault is not a keyring
+```
+
+This is deliberate. An exported credential would be readable by every child
+process and would surface in tool output, which is exactly what the vault
+exists to prevent. Use `use_secret` with `stdin`/`secret`/`env` instead — the
+value goes to one named program, and the approval prompt says which.
+
+Reading the file directly (`cat ~/.config/coda/secrets/x.secret`) also works,
+because it is your file — but it puts the value in the transcript and leaves it
+there for `redact()` to chase. Prefer `use_secret`.
 
 `write_file` and `edit_file` also refuse content containing a known secret. That
 closes the easy accident; it does not stop a subprocess redirecting its own

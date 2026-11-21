@@ -641,11 +641,18 @@ export class Agent {
     if (name !== "use_secret") return runTool(name, args);
 
     const argv: string[] = Array.isArray(args?.command) ? args.command.map(String) : [];
+    // Every place a credential can travel has to be listed here, or it reaches
+    // the child without the user ever being asked. `env` is the newest of them.
+    const envValues =
+      args?.env && typeof args.env === "object"
+        ? Object.values(args.env).map(String)
+        : [];
     const names = [
       ...new Set([
         ...argv.flatMap((part) => secretNamesIn(part)),
         ...(typeof args?.stdin === "string" ? secretNamesIn(args.stdin) : []),
         ...(typeof args?.secret === "string" ? [args.secret] : []),
+        ...envValues.flatMap((v) => secretNamesIn(v)),
       ]),
     ];
 
@@ -653,9 +660,14 @@ export class Agent {
     const pending = names.filter((n) => !this.approvedSecrets.has(n));
 
     if (pending.length) {
+      // Name the environment variables too: "run gh pr create" reads very
+      // differently from "run gh pr create with GH_TOKEN set".
+      const envNames =
+        args?.env && typeof args.env === "object" ? Object.keys(args.env) : [];
       const summary =
         `Use credential${pending.length > 1 ? "s" : ""} ${pending.join(", ")} to run:\n` +
-        `  ${argv.join(" ") || "(no command)"}`;
+        `  ${argv.join(" ") || "(no command)"}` +
+        (envNames.length ? `\n  (sets ${envNames.join(", ")} in its environment)` : "");
 
       if (!this.confirm) {
         return {

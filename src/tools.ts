@@ -243,6 +243,16 @@ export const toolDefinitions: ChatCompletionTool[] = [
               "Optional: a single vault secret to write to the child's stdin when " +
               "`stdin` is not given.",
           },
+          env: {
+            type: "object",
+            description:
+              "Optional: environment variables for the child, as name -> value. " +
+              "Use it for programs that read a credential from the environment " +
+              "rather than stdin (gh, curl -u). Values may contain " +
+              "{{secret:NAME}} placeholders, and a placeholder is the only way to " +
+              "pass a secret here -- a literal value is refused.",
+            additionalProperties: { type: "string" },
+          },
         },
         required: ["command"],
       },
@@ -333,6 +343,7 @@ export async function runWithSecrets(args: {
   command: string[];
   stdin?: string;
   secret?: string;
+  env?: Record<string, string>;
 }): Promise<ToolResult> {
   const argv = Array.isArray(args.command) ? args.command.map(String) : null;
   if (!argv || argv.length === 0) {
@@ -360,6 +371,33 @@ export async function runWithSecrets(args: {
     const r = substituteSecrets(part);
     if (r.ok) resolved.push(r.text);
     else missing.push(...r.missing);
+  }
+
+  // The environment, same rule as argv: the value travels in a placeholder, and
+  // a literal is refused. `spawn` with `shell: false` hands this straight to the
+  // child, so nothing re-parses it -- and unlike argv it never appears in `ps`.
+  const env: Record<string, string> = {};
+  if (args.env && typeof args.env === "object") {
+    for (const [name, raw] of Object.entries(args.env)) {
+      const value = String(raw);
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        return {
+          ok: false,
+          output: `use_secret: \`${name}\` is not a valid environment variable name`,
+        };
+      }
+      if (containsSecret(value)) {
+        return {
+          ok: false,
+          output:
+            "use_secret: refused -- an env value contains a known secret literally. " +
+            "Use a {{secret:NAME}} placeholder instead.",
+        };
+      }
+      const r = substituteSecrets(value);
+      if (r.ok) env[name] = r.text;
+      else missing.push(...r.missing);
+    }
   }
 
   let stdin = args.stdin;
@@ -394,6 +432,11 @@ export async function runWithSecrets(args: {
       const child = spawn(resolved[0], resolved.slice(1), {
         cwd: process.cwd(),
         shell: false,
+        // Merged over the inherited environment rather than replacing it: a
+        // child still needs PATH and HOME to work. `shell: false` means these
+        // values are passed through untouched, with no expansion of `$` or
+        // backticks, so a credential containing either stays literal.
+        env: Object.keys(env).length ? { ...process.env, ...env } : process.env,
         stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       });
 
