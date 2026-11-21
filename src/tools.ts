@@ -258,7 +258,53 @@ export const toolDefinitions: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "run_interactive",
+      description:
+        "Run a command that needs the terminal itself -- a login that prompts, " +
+        "opens a browser and prints a code (gh auth login, aws sso login, " +
+        "gcloud auth login, docker login). The user's terminal is handed to the " +
+        "command until it exits, so coda stops drawing and the user's keystrokes " +
+        "go to it. Use this ONLY for commands that prompt; ordinary commands " +
+        "belong in `bash`. Every call is approved by the user first. You are " +
+        "told the exit status, not the output: a login prints secrets and URLs " +
+        "that must not enter the transcript.",
+      parameters: {
+        type: "object",
+        properties: {
+          command: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "The program and its arguments as separate strings. No shell runs, " +
+              "so there is no quoting, globbing, piping or redirection.",
+          },
+        },
+        required: ["command"],
+      },
+    },
+  },
 ];
+
+/**
+ * A request to hand the terminal to an interactive command.
+ *
+ * Set by `run_interactive` instead of running anything: `tools.ts` has no
+ * terminal, so the app decides whether to hand it over. Approval happens in the
+ * app, the same way `use_secret` is gated -- but for a different reason. There
+ * the question is "may this credential be spent"; here it is "may this command
+ * have the terminal", because once it does, the user's keystrokes go to it and
+ * coda stops drawing.
+ *
+ * The approval is per call with no allowlist: a compiled list of login commands
+ * would need a release for every new one, and an entry approved once could be
+ * re-run later without asking.
+ */
+export interface InteractiveRequest {
+  argv: string[];
+}
 
 export interface ToolResult {
   ok: boolean;
@@ -273,6 +319,13 @@ export interface ToolResult {
    * after the tool result.
    */
   attach?: string[];
+  /**
+   * Set by `run_interactive`: the app must ask, then hand over the terminal.
+   *
+   * Nothing has run when this is returned. The app performs the handover and
+   * reports the exit status back as an ordinary tool result.
+   */
+  interactive?: InteractiveRequest;
   /** Set by `use_secret` to say what the user was asked to approve. */
   requiresConfirmation?: {
     /** Secret names referenced by the command, in order of first use. */
@@ -714,6 +767,38 @@ export async function runTool(name: string, args: any): Promise<ToolResult> {
             "new_session: this session cannot open a new one (no UI attached). " +
             "Ask the user to press Ctrl+T.",
         };
+      }
+      case "run_interactive": {
+        // Nothing runs here: the tool has no terminal. Validating the shape and
+        // returning the request lets the app ask the user and do the handover,
+        // keeping the decision in the layer that owns the screen.
+        const argv = Array.isArray(args?.command) ? args.command.map(String) : null;
+        if (!argv || argv.length === 0) {
+          return {
+            ok: false,
+            output: "run_interactive: `command` must be a non-empty array of strings",
+          };
+        }
+        // A secret must not travel through a command that owns the terminal:
+        // the child would print it, and nothing redacts what the child writes
+        // directly to the screen.
+        if (containsSecret(argv.join("\n"))) {
+          return {
+            ok: false,
+            output:
+              "run_interactive: refused -- the command contains a known secret. " +
+              "Use use_secret for credential-bearing commands.",
+          };
+        }
+        if (secretNamesIn(argv.join(" ")).length) {
+          return {
+            ok: false,
+            output:
+              "run_interactive: refused -- placeholders are not substituted for an " +
+              "interactive command, because its output is not redacted. Use use_secret.",
+          };
+        }
+        return { ok: true, output: "", interactive: { argv } };
       }
       case "use_secret": {
         // Confirmation is the agent's job (see `Agent.send`): this is a plain
