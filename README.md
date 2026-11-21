@@ -131,6 +131,36 @@ independent of streaming: a reply that is still arriving keeps appending at the
 tail without yanking you back down, so you can read earlier output while the
 model is still writing.
 
+### Token usage
+
+Each assistant reply records what the provider said it cost, in
+`~/.coda/sessions/<id>.json`:
+
+```json
+"usage": {
+  "promptTokens": 1656,
+  "completionTokens": 1,
+  "totalTokens": 1657,
+  "details": { "prompt_cache_hit_tokens": 1408, "prompt_cache_miss_tokens": 248 },
+  "model": "deepseek-flash"
+}
+```
+
+- **Counts only — never message text.** A session file is plain JSON written on
+  every turn and re-sent as history, so nothing but numbers and the model name
+  goes in.
+- **`unknown: true` means the provider reported nothing**, which is not the same
+  as zero. `coda` asks for usage with `stream_options: { include_usage: true }`;
+  providers that ignore it leave the turn marked unknown rather than estimated.
+- **A turn can make several requests** (one per tool round-trip) and the entry's
+  numbers are sums. If any of them went unreported, `unknown` stays set, so a
+  total is never mistaken for complete.
+- **`details` holds provider-specific counters** — DeepSeek reports cache hits
+  and misses and reasoning tokens, and those are what make a cost figure
+  accurate rather than a guess. Anything non-numeric is dropped.
+- Sessions written before this existed simply have no `usage`, so a reader must
+  treat absent as "not recorded".
+
 ### Status line
 
 The line under the input shows `○ idle` or `● thinking`, and how many tools are

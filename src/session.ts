@@ -5,6 +5,7 @@ import {
   isRequestRejection,
 } from "./agent.js";
 import type { AttachedImage } from "./image.js";
+import type { EntryUsage } from "./store.js";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { Config } from "./config.js";
 import { SessionLock, acquireLock, describeHolder } from "./lock.js";
@@ -22,12 +23,64 @@ import { redact } from "./secrets.js";
  * `buf` holds the assistant bubble currently being appended to; it is returned
  * (possibly a new one) so the caller keeps accumulating into the same entry.
  */
+/**
+ * Fold one response's usage into an entry's running total.
+ *
+ * A turn can make several requests -- one per tool round-trip -- and each
+ * reports its own usage, so the entry's numbers are sums. `unknown` is sticky:
+ * if any request in the entry went unreported, the total is a lower bound and
+ * has to say so rather than look complete.
+ */
+export function mergeUsage(
+  prev: EntryUsage | undefined,
+  next: EntryUsage
+): EntryUsage {
+  const add = (a?: number, b?: number): number | undefined =>
+    a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
+
+  const details: Record<string, number> = { ...(prev?.details ?? {}) };
+  for (const [k, v] of Object.entries(next.details ?? {})) {
+    details[k] = (details[k] ?? 0) + v;
+  }
+
+  const merged: EntryUsage = {
+    promptTokens: add(prev?.promptTokens, next.promptTokens),
+    completionTokens: add(prev?.completionTokens, next.completionTokens),
+    totalTokens: add(prev?.totalTokens, next.totalTokens),
+  };
+  if (Object.keys(details).length) merged.details = details;
+  const model = next.model ?? prev?.model;
+  if (model) merged.model = model;
+  if (prev?.unknown || next.unknown) merged.unknown = true;
+
+  // Drop the undefined keys so a session file stays small and readable.
+  for (const k of ["promptTokens", "completionTokens", "totalTokens"] as const) {
+    if (merged[k] === undefined) delete merged[k];
+  }
+  return merged;
+}
+
 export function applyEvent(
   entries: Entry[],
   ev: AgentEvent,
   buf: Entry | null
 ): Entry | null {
   switch (ev.type) {
+    case "usage": {
+      // Attach to the assistant entry being built. A provider can report usage
+      // for a response that produced no text (a tool-only turn), in which case
+      // there is no open entry and the numbers still have to land somewhere --
+      // creating an empty assistant row would show as a blank line, so they go
+      // on the previous assistant entry if there is one.
+      const target =
+        buf ??
+        [...entries].reverse().find((e) => e.role === "assistant");
+      if (!target) return buf;
+      // Repeated calls add up: one turn can make several requests (tool
+      // round-trips), each with its own usage.
+      target.usage = mergeUsage(target.usage, ev.usage);
+      return buf;
+    }
     case "text": {
       const target = buf ?? { role: "assistant", text: "" };
       if (!buf) entries.push(target);

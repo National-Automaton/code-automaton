@@ -266,7 +266,78 @@ export async function compactHistory(
  * Events emitted while the agent works. The UI layer decides how to render
  * them; the agent never writes to stdout directly.
  */
+/**
+ * Token usage for one assistant turn, as the provider reported it.
+ *
+ * Only counters and low-cardinality labels -- never message text. A session
+ * file is plain JSON written on every turn, so anything here is on disk and
+ * re-sent as history; counts are safe, content is not.
+ *
+ * `unknown: true` means the provider sent no usage for this turn. That is
+ * distinct from zero: providers only report usage when asked, and not all of
+ * them honour the request, so a turn with no numbers must not be reported as
+ * a turn that used nothing.
+ */
+export interface TurnUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  /**
+   * Provider-specific extras, kept because they are what makes cost accurate:
+   * DeepSeek reports `prompt_cache_hit_tokens` and `reasoning_tokens`, which
+   * decide the real bill. Flat numbers only, so the shape stays predictable.
+   */
+  details?: Record<string, number>;
+  /** The model that answered, as the provider named it. */
+  model?: string;
+  /** True when the provider sent no usage at all for this turn. */
+  unknown?: boolean;
+}
+
+/**
+ * Turn a provider's usage object into `TurnUsage`.
+ *
+ * Every numeric leaf is kept under `details` with a flattened dotted key, so a
+ * provider's extra counters survive without this module having to know them:
+ * DeepSeek's `prompt_tokens_details.cached_tokens` becomes
+ * `prompt_tokens_details.cached_tokens`. Only numbers are taken -- an unknown
+ * provider could put anything here, and none of it should reach a session file
+ * unless it is a count.
+ */
+export function normaliseUsage(raw: any, model?: string): TurnUsage {
+  const num = (v: any): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined;
+
+  const out: TurnUsage = {};
+  const prompt = num(raw?.prompt_tokens);
+  const completion = num(raw?.completion_tokens);
+  const total = num(raw?.total_tokens);
+  if (prompt !== undefined) out.promptTokens = prompt;
+  if (completion !== undefined) out.completionTokens = completion;
+  if (total !== undefined) out.totalTokens = total;
+  if (model) out.model = model;
+
+  const details: Record<string, number> = {};
+  const walk = (value: any, prefix: string) => {
+    for (const [k, v] of Object.entries(value ?? {})) {
+      const key = prefix ? `${prefix}.${k}` : k;
+      const n = num(v);
+      if (n !== undefined) {
+        // The three counters above are not repeated in `details`.
+        if (!["prompt_tokens", "completion_tokens", "total_tokens"].includes(key)) details[key] = n;
+      } else if (v && typeof v === "object" && !Array.isArray(v)) {
+        walk(v, key);
+      }
+    }
+  };
+  walk(raw, "");
+  if (Object.keys(details).length) out.details = details;
+
+  return out;
+}
+
 export type AgentEvent =
+  | { type: "usage"; usage: TurnUsage }
   | { type: "text"; text: string }
   | { type: "tool_start"; name: string; args: any }
   | { type: "tool_result"; name: string; ok: boolean; output: string }
@@ -1104,8 +1175,17 @@ export class Agent {
         // committed below like any other content, and the continuation builds
         // on it instead of repeating it.
         let interrupted = false;
+        // The last usage block the provider sends. Gemini sends one twice, so
+        // this is assigned rather than kept-first.
+        let usage: TurnUsage | undefined;
         try {
           for await (const chunk of stream) {
+            // Usage arrives on a final chunk with an empty `choices` array, so
+            // it has to be read before the delta guard below drops the chunk.
+            const reported = (chunk as any).usage;
+            if (reported && typeof reported === "object") {
+              usage = normaliseUsage(reported, (chunk as any).model ?? model);
+            }
             const delta = chunk.choices[0]?.delta;
             if (!delta) continue;
             if (delta.content) {
@@ -1193,6 +1273,12 @@ export class Agent {
           ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
         };
         this.messages.push(assistantMsg);
+
+        // Report this response's cost before the turn ends. A provider that
+        // sent no usage is recorded as `unknown` rather than omitted, so a
+        // session's totals can say "not reported" instead of quietly reading
+        // as free.
+        emit({ type: "usage", usage: usage ?? { unknown: true, ...(model ? { model } : {}) } });
 
         if (!toolCalls.length) {
           emit({ type: "done" });
@@ -1308,6 +1394,11 @@ export class Agent {
           messages: trimHistory(this.messages),
           tools: toolDefinitions,
           stream: true,
+          // Ask the provider to close the stream with a usage block. Without
+          // this the numbers are simply never sent, which is why sessions had
+          // none to record. Providers that ignore the option are handled by
+          // `TurnUsage.unknown` rather than being estimated.
+          stream_options: { include_usage: true },
         });
       } catch (err: any) {
         const status = err?.status ?? err?.response?.status;
