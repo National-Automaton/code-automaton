@@ -610,8 +610,25 @@ run this command?   y = once · a = always · n / Esc = no
   keep up to date — that would need a code change per new tool, and an entry
   approved once could be re-run later without asking.
 - **Coda suspends**: mouse reporting and paste are switched off and the terminal
-  returns to cooked mode, so the child gets a real TTY. The screen is redrawn
-  when it exits, and its output stays in the terminal's scrollback.
+  returns to cooked mode, so the child gets a real TTY. A banner marks the hand
+  over and the return, written straight to the terminal — a note in coda's frame
+  would never be seen, since nothing is drawn while the child has the screen:
+
+  ```
+  ────────────────────────────────────────────────
+    terminal handed to: gh auth login
+    coda is suspended. Finish there, or press Ctrl+C to abort.
+  ────────────────────────────────────────────────
+
+  … the command's own output …
+
+  ────────────────────────────────────────────────
+    back in coda -- gh auth login exited 0
+  ────────────────────────────────────────────────
+  ```
+
+  The command's output stays in the terminal's scrollback; coda redraws over
+  the screen when it returns.
 - **You see the exit status, not the output.** The child writes straight to the
   screen, so coda never captures it — and a login prints a URL and sometimes a
   one-time code, which has no business in a transcript that is saved and

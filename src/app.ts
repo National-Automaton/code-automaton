@@ -2437,16 +2437,30 @@ export class App {
       };
     }
 
-    this.systemNote(
-      `handing the terminal to: ${argv.join(" ")}\n` +
-        "  coda is suspended until it exits; press Ctrl+C there to abort."
-    );
+    // Recorded for the transcript, so the session shows that a child took the
+    // screen -- but this alone is not the banner: a system note only appears on
+    // the next render, and there are no renders while the child owns the
+    // terminal. It is written directly below, once the screen is stopped.
+    this.systemNote(`handed the terminal to: ${argv.join(" ")}`);
 
     // Suspended for the duration, so any prompt that tries to open meanwhile is
     // refused rather than drawn into a terminal the child owns.
     this.handedOver = true;
     this.screen.stop();
     this.keys.stop();
+
+    // Written straight to the terminal, after coda's modes are off: the child
+    // is about to start drawing, and a banner that is only drawn on the next
+    // coda frame would never be seen. Deliberately loud -- this is the one
+    // moment where the screen stops belonging to coda, and the user needs to
+    // know both that it happened and how to get out.
+    const rule = "─".repeat(Math.max(10, Math.min(this.screen.width - 1, 72)));
+    process.stdout.write(
+      `\n${rule}\n` +
+        `  terminal handed to: ${argv.join(" ")}\n` +
+        `  coda is suspended. Finish there, or press Ctrl+C to abort.\n` +
+        `${rule}\n\n`
+    );
 
     let code: number | null = null;
     let failure: string | null = null;
@@ -2469,6 +2483,20 @@ export class App {
     } finally {
       this.handoverChild = null;
       this.handedOver = false;
+      // A closing banner, straight to the terminal. Without it the child's last
+      // output is simply replaced by a repainted coda frame, with no word about
+      // whether anything succeeded -- and the exit status is the one thing the
+      // model is given, so it is the one thing the user should see too.
+      const how =
+        failure !== null
+          ? `could not start (${failure})`
+          : code === null
+            ? "was interrupted"
+            : `exited ${code}`;
+      process.stdout.write(
+        `\n${"─".repeat(Math.max(10, Math.min(this.screen.width - 1, 72)))}\n` +
+          `  back in coda -- ${argv.join(" ")} ${how}\n\n`
+      );
       // Back to coda's own modes, then repaint from scratch: the child's output
       // overwrote the frame, and `draw()` begins with an erase, so the screen is
       // clean. The login output stays in the terminal's scrollback.
