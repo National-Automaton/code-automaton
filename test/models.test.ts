@@ -16,7 +16,7 @@
  */
 import { strict as assert } from "node:assert";
 import type { Config } from "../src/config.js";
-import { bareId, isChatModel, loadCatalog, supportsImages } from "../src/models.js";
+import { bareId, declaredVision, isChatModel, loadCatalog, supportsImages } from "../src/models.js";
 
 const baseConfig = {
   apiKey: "sk-test",
@@ -33,16 +33,22 @@ const baseConfig = {
 const realFetch = globalThis.fetch;
 
 /** Stub `fetch` with a per-URL responder; `null` means "unreachable". */
-function stubFetch(responses: Record<string, string[] | null>): string[] {
+function stubFetch(
+  responses: Record<string, Array<string | Record<string, any>> | null>
+): string[] {
   const asked: string[] = [];
   globalThis.fetch = (async (input: any) => {
     const url = String(input);
     asked.push(url);
-    const ids = responses[url];
-    if (ids === undefined || ids === null) throw new Error("unreachable");
+    const entries = responses[url];
+    if (entries === undefined || entries === null) throw new Error("unreachable");
     return {
       ok: true,
-      json: async () => ({ data: ids.map((id) => ({ id })) }),
+      // A bare string stands for `{ id }`; an object is passed through, so a
+      // test can supply capability metadata the way a real endpoint does.
+      json: async () => ({
+        data: entries.map((e) => (typeof e === "string" ? { id: e } : e)),
+      }),
     } as any;
   }) as typeof fetch;
   return asked;
@@ -218,6 +224,134 @@ assert.equal(bareId("deepseek-flash"), "deepseek-flash", "a bare id is unchanged
   const ids = cat.chat.map((c) => c.id);
   assert.ok(ids.includes("deepseek-flash"), "the configured model is always listed");
   assert.ok(ids.includes("something-else"), "the fetched models are listed too");
+}
+
+// --- a model's image support is taken from the endpoint's own declaration ---
+//
+// `supportsImages` matched model *names* against a fixed list, so `grok-4`
+// matched nothing and no x.ai model could appear in the image column however
+// capable it was (issue #88). Providers that report capabilities are now
+// believed over the list; those that say nothing still fall back to it.
+
+// The three shapes seen in the wild.
+{
+  // DeepSeek: input_modalities, and it distinguishes models on one endpoint.
+  assert.equal(declaredVision({ id: "a", input_modalities: ["text", "image"] }), true);
+  assert.equal(declaredVision({ id: "b", input_modalities: ["text"] }), false);
+  // Some gateways nest it.
+  assert.equal(declaredVision({ id: "c", architecture: { input_modalities: ["text", "image"] } }), true);
+  assert.equal(declaredVision({ id: "d", architecture: { modality: ["text"] } }), false);
+  // x.ai: no modalities, but a model is priced for image input only if it takes
+  // images. Every chat model there has the price; image-*generation* models
+  // have no prices at all.
+  assert.equal(declaredVision({ id: "e", prompt_image_token_price: 12500 }), true);
+  assert.equal(declaredVision({ id: "e2", prompt_image_token_price: 0 }), true, "zero is still a price");
+  // Nothing usable -- the caller must fall back rather than assume "no".
+  assert.equal(declaredVision({ id: "f" }), null, "no metadata is not a 'no'");
+  assert.equal(declaredVision({ id: "g", input_modalities: ["audio"] }), null,
+    "an unrelated modality says nothing about images");
+  assert.equal(declaredVision({ id: "h", display_name: "Gemini 2.5 Flash" }), null,
+    "Gemini's /models reports only display_name");
+}
+
+// A vision-capable model the name list does not know is offered for images.
+//
+// One endpoint serving both roles, which is where a declaration takes effect
+// today: the image route and the text endpoint are the same service, so the
+// endpoint's own statement about its models is the last word.
+{
+  const shared = {
+    ...baseConfig,
+    visionBaseURL: baseConfig.baseURL,
+    visionApiKey: baseConfig.apiKey,
+  } as unknown as Config;
+  stubFetch({
+    "https://text.example/v1/models": [
+      // `grok-4` matches no VISION_MARKERS entry.
+      { id: "grok-4", input_modalities: ["text", "image"] },
+    ],
+  });
+  const cat = await loadCatalog(shared);
+  globalThis.fetch = realFetch;
+
+  const grok = cat.chat.find((c) => c.id === "grok-4")!;
+  assert.ok(grok, "the model is listed");
+  assert.equal(grok.text, true, "it answers text");
+  assert.equal(grok.vision, true,
+    "the endpoint says it takes images, so it is offered for them");
+  assert.equal(supportsImages("grok-4"), false,
+    "without the declaration the name heuristic alone would have refused it");
+}
+
+// A model the endpoint says is text-only is not offered for images, even when
+// its name would have suggested otherwise.
+//
+// Not the *configured* vision model: that one is trusted regardless of what the
+// endpoint claims, because it is configured precisely because it is known to
+// work. Any other name matching the heuristic is judged by the declaration.
+{
+  const shared = {
+    ...baseConfig,
+    visionModel: "something-else-entirely",
+    visionBaseURL: baseConfig.baseURL,
+    visionApiKey: baseConfig.apiKey,
+  } as unknown as Config;
+  stubFetch({
+    "https://text.example/v1/models": [
+      { id: "gemini-3.6-flash", input_modalities: ["text"] },
+    ],
+  });
+  const cat = await loadCatalog(shared);
+  globalThis.fetch = realFetch;
+
+  assert.equal(supportsImages("gemini-3.6-flash"), true, "the name alone says vision");
+  const m = cat.chat.find((c) => c.id === "gemini-3.6-flash")!;
+  assert.equal(m.vision, false, "but the endpoint says text-only, and it is believed");
+}
+
+// The image route is still the *vision endpoint*. A model the text endpoint
+// says takes images is NOT offered for images while the vision route points
+// somewhere else: routing it there would send it to a service that does not
+// serve it, which is the bug #74 fixed. Per-endpoint vision is what would let
+// an endpoint use its own image models, and that is separate work.
+{
+  stubFetch({
+    "https://text.example/v1/models": [{ id: "grok-4", input_modalities: ["text", "image"] }],
+    "https://vision.example/v1/models": ["models/gemini-2.5-flash"],
+  });
+  const cat = await loadCatalog(baseConfig);
+  globalThis.fetch = realFetch;
+
+  const grok = cat.chat.find((c) => c.id === "grok-4")!;
+  assert.equal(grok.vision, false,
+    "the vision route is elsewhere, so this endpoint's declaration is not enough");
+  assert.equal(grok.text, true, "it is still a text model");
+
+  // With a single endpoint, the declaration is the last word.
+  const shared = {
+    ...baseConfig,
+    visionBaseURL: baseConfig.baseURL,
+    visionApiKey: baseConfig.apiKey,
+  } as unknown as Config;
+  stubFetch({ "https://text.example/v1/models": [{ id: "grok-4", input_modalities: ["text", "image"] }] });
+  const one = await loadCatalog(shared);
+  globalThis.fetch = realFetch;
+  assert.equal(one.chat.find((c) => c.id === "grok-4")!.vision, true,
+    "one endpoint serves both roles, so its own declaration decides");
+}
+
+// A configured vision model is trusted even when nothing declares it.
+{
+  stubFetch({
+    "https://text.example/v1/models": ["deepseek-flash"],
+    "https://vision.example/v1/models": [{ id: "models/some-odd-name", input_modalities: ["text"] }],
+  });
+  const cat = await loadCatalog(baseConfig);
+  globalThis.fetch = realFetch;
+
+  const configured = cat.chat.find((c) => c.id === "gemini-3.6-flash");
+  assert.ok(configured, "the configured vision model is still listed");
+  assert.equal(configured!.vision, true, "and is trusted regardless of metadata");
 }
 
 console.log("models.test.ts: ok");
