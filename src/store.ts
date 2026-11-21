@@ -32,6 +32,25 @@ export interface Entry {
   /** tool name, when role === "tool" */
   name?: string;
   ok?: boolean;
+  /**
+   * What the provider said this reply cost, in tokens.
+   *
+   * Counts and labels only -- no message text. Absent on every entry written
+   * before this existed, and on any turn whose provider reported nothing, so
+   * a reader must treat absent as "not reported" rather than as zero.
+   */
+  usage?: EntryUsage;
+}
+
+/** Token counters for one assistant entry, merged across its requests. */
+export interface EntryUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  details?: Record<string, number>;
+  model?: string;
+  /** True when at least one request in this entry reported no usage. */
+  unknown?: boolean;
 }
 
 /** Serialised form of a session on disk. */
