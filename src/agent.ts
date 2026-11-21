@@ -116,8 +116,10 @@ export function retryHintMs(err: any): number | null {
     if (ms !== null) return ms;
   }
 
-  // The body: "Please retry in 30.5s" is the clearest signal there is.
-  const message = String(err?.message ?? "");
+  // The body: "Please retry in 30.5s" is the clearest signal there is. Read it
+  // from the provider's own error object when the SDK discarded it -- Gemini's
+  // array-shaped errors arrive as "no body" otherwise.
+  const message = providerMessage(err) || String(err?.message ?? "");
   const inMessage = /retry in ([0-9]+(?:\.[0-9]+)?)\s*s/i.exec(message);
   if (inMessage) {
     const n = Number(inMessage[1]);
@@ -134,9 +136,134 @@ export function retryHintMs(err: any): number | null {
  * provider usually says which it is, so say it back rather than making them
  * guess.
  */
+/**
+ * The provider's own error object, when the SDK lost it.
+ *
+ * Google's OpenAI-compatible endpoint returns errors as a JSON **array** --
+ * `[{"error": {"code": 429, "message": "…", "status": "RESOURCE_EXHAUSTED"}}]`
+ * -- where the SDK expects `{"error": …}`. It finds no `error` key, decides
+ * there is no body, and reports a bare `429 status code (no body)`: the
+ * provider's explanation of *what* was limited and *when* to retry is thrown
+ * away before anything can use it.
+ *
+ * This digs the object out of whatever the SDK left on the error, so the
+ * message and the retry hint survive.
+ */
+/**
+ * Provider messages recovered from raw error bodies, keyed by status+request id.
+ *
+ * The SDK discards bodies it cannot parse, and Google's OpenAI-compatible
+ * endpoint returns `[{error: {...}}]` -- an array where the SDK expects an
+ * object -- so the explanation is gone by the time anything downstream can look
+ * at `err`. A plain `err.error` is `undefined` and the message reads
+ * "429 status code (no body)".
+ *
+ * Rather than discard it too, the body is read once here and kept. Keyed
+ * loosely because the error and the response are joined only by the request;
+ * a handful of entries is all that can be in flight, and old ones are dropped.
+ */
+const recoveredBodies = new Map<string, any>();
+
+function bodyKey(res: Response, text: string): string {
+  return `${res.status}\u0000${text.slice(0, 200)}`;
+}
+
+/**
+ * `fetch` for the OpenAI clients that remembers unparseable error bodies.
+ *
+ * Wraps the platform fetch rather than replacing it: the response is handed to
+ * the SDK untouched, and the clone is read only when the status is an error --
+ * so a successful stream costs nothing beyond a clone.
+ */
+export function recordingFetch(): typeof fetch {
+  return (async (input: any, init?: any) => {
+    const res = await globalThis.fetch(input, init);
+    if (res.ok) return res;
+    try {
+      const copy = res.clone();
+      const text = await copy.text();
+      if (text) {
+        recoveredBodies.set(bodyKey(res, text), text);
+        // Bound the map: these are only ever read moments after the error.
+        if (recoveredBodies.size > 32) {
+          const first = recoveredBodies.keys().next().value;
+          if (first !== undefined) recoveredBodies.delete(first);
+        }
+      }
+    } catch {
+      // A body that cannot be read is the situation this is trying to improve,
+      // not one to fail the request over.
+    }
+    return res;
+  }) as typeof fetch;
+}
+
+/** Parse a recovered raw body into the provider's error object, if possible. */
+function parseRecovered(text: string): any {
+  try {
+    const j = JSON.parse(text);
+    const first = Array.isArray(j) ? j[0] : j;
+    if (first && typeof first === "object") {
+      return first.error && typeof first.error === "object" ? first.error : first;
+    }
+  } catch {
+    // Not JSON -- some providers send plain text. Hand it back as the message.
+    return text.trim() ? { message: text.trim() } : null;
+  }
+  return null;
+}
+
+export function providerError(err: any): any {
+  // Bodies the SDK could not parse, kept by `recordingFetch`. Checked first:
+  // when it has one it is the provider's own words, which beats a derived
+  // message every time.
+  if (recoveredBodies.size) {
+    for (const [k, text] of recoveredBodies) {
+      if (k.startsWith(`${err?.status ?? ""}\u0000`)) {
+        const parsed = parseRecovered(text);
+        if (parsed) return parsed;
+      }
+    }
+  }
+
+  const candidates = [err?.error, (err as any)?.response?.data, (err as any)?.body];
+  for (const c of candidates) {
+    const first = Array.isArray(c) ? c[0] : c;
+    if (first && typeof first === "object") {
+      if (first.error && typeof first.error === "object") return first.error;
+      if (first.message || first.status || first.code) return first;
+    }
+  }
+  return null;
+}
+
+/**
+ * Everything the provider said, as one string.
+ *
+ * Concatenates the message with any status/code label, because Gemini puts the
+ * useful part in different places: `RESOURCE_EXHAUSTED` says *what*, the
+ * message says *why* and *when to retry*.
+ */
+function providerMessage(err: any): string {
+  const e = providerError(err);
+  const parts = [
+    e?.message,
+    e?.status,
+    e?.code,
+    typeof err?.message === "string" && !/status code \(no body\)/.test(err.message)
+      ? err.message
+      : null,
+  ];
+  return [...new Set(parts.filter((p): p is string => typeof p === "string" && p.trim() !== ""))]
+    .join(" · ");
+}
+
 export function explainRejection(err: any): string {
   const status = err?.status ?? err?.response?.status;
-  const message = String(err?.message ?? "").trim();
+  // Never pass on the SDK's "429 status code (no body)": it tells the user
+  // nothing, and reads like the request was malformed rather than limited.
+  const raw = providerMessage(err) || String(err?.message ?? "");
+  const message = /status code \(no body\)/.test(raw) ? "" : raw.trim();
   if (status === 429) {
     const hint = retryHintMs(err);
     const when = hint !== null ? ` Retry in about ${Math.ceil(hint / 1000)}s.` : "";
@@ -594,12 +721,12 @@ export class Agent {
     this.client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseURL,
-      fetch: globalThis.fetch,
+      fetch: recordingFetch(),
     });
     this.visionClient = new OpenAI({
       apiKey: config.visionApiKey,
       baseURL: config.visionBaseURL,
-      fetch: globalThis.fetch,
+      fetch: recordingFetch(),
     });
     // A resumed session already carries its system prompt, so the user's
     // instructions are not re-applied: the history is what it was, and
@@ -1156,7 +1283,7 @@ export class Agent {
     const client = new OpenAI({
       apiKey: key ?? "",
       baseURL: endpoint.baseURL,
-      fetch: globalThis.fetch,
+      fetch: recordingFetch(),
     });
     this.endpointClients.set(endpoint.name, client);
     return client;
@@ -1604,7 +1731,7 @@ export class Agent {
           type: "text",
           text:
             `\n[${model} returned ${status}, retrying in ${Math.round(waitMs / 1000)}s ` +
-            `(${attempt}/${attempts - 1})]\n`,
+            `(${attempt}/${attempts})]\n`,
         });
         await new Promise((r) => setTimeout(r, waitMs));
       }

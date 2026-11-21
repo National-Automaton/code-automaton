@@ -143,4 +143,45 @@ for (const args of [{}, { command: [] }, { command: "gh auth login" }]) {
   assert.ok(/cannot hand over/i.test(res.output), res.output);
 }
 
+// --- a brand-new session can hand over too --------------------------------
+//
+// The first message typed into a fresh session takes a different path through
+// the app (`startNewSessionWith`) than a message in an existing one. Only the
+// latter was wired, so `gh auth login` as a session's first message was refused
+// with "this session cannot hand over the terminal" -- after the user had
+// already approved it.
+{
+  const { App } = await import("../src/app.js");
+  const cfg = {
+    apiKey: "sk-test-placeholder", baseURL: "https://example.invalid", model: "m",
+    visionModel: "", visionBaseURL: "https://example.invalid",
+    visionApiKey: "sk-test-placeholder", endpoints: [], mouse: false,
+    parallelTools: true, compact: false,
+  } as any;
+  const a: any = new App(cfg);
+  const { Session } = await import("../src/session.js");
+  const s = new Session(cfg);
+  a.sessions.push(s);
+  a.setActive(s);
+
+  // Wrap the handover so nothing real runs, then start a first-message turn.
+  let called = false;
+  a.handOverTerminal = async () => {
+    called = true;
+    return { ok: true, output: "ok" };
+  };
+  a.startNewSessionWith("gh auth login");
+  // `run` is fire-and-forget from the app's side, so the callbacks are installed
+  // once its first `await` yields. Yield once here rather than sleeping.
+  await new Promise((r) => setImmediate(r));
+
+  const agent: any = a.current().agent;
+  assert.equal(typeof agent.handOver, "function",
+    "a new session's agent is given the handover, so its first command can use it");
+
+  const res: any = await agent.handOver(["gh", "auth", "login"]);
+  assert.ok(called, "and it reaches the app's handover");
+  assert.equal(res.ok, true);
+}
+
 console.log("interactive.test.ts: ok");

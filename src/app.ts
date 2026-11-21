@@ -1433,7 +1433,8 @@ export class App {
         () => this.requestRender(),
         images,
         (summary, secrets) => this.askApproval(summary, secrets),
-        (name, label, hidden) => this.askSecretInput(name, label, hidden)
+        (name, label, hidden) => this.askSecretInput(name, label, hidden),
+        (argv) => this.handOverTerminal(argv)
       ).then((res) => this.afterTurn(res))
         .catch(() => {});
     }

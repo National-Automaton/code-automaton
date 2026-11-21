@@ -21,7 +21,7 @@ import { strict as assert } from "node:assert";
 
 process.env.OPENAI_API_KEY ||= "sk-test-placeholder";
 
-const { retryHintMs, explainRejection } = await import("../src/agent.js");
+const { retryHintMs, explainRejection, providerError } = await import("../src/agent.js");
 
 /** A provider error with optional headers, in the shape the SDK throws. */
 function apiError(status: number, message: string, headers: Record<string, string> = {}) {
@@ -147,6 +147,99 @@ function apiError(status: number, message: string, headers: Record<string, strin
 
   const notices = events.filter((e) => e.type === "text").map((e) => e.text).join("");
   assert.ok(/retrying in 2s/.test(notices), `the retry delay is reported: ${notices}`);
+}
+
+// --- Gemini's array-shaped errors ----------------------------------------
+//
+// Google's OpenAI-compatible endpoint returns `[{error: {...}}]`, not
+// `{error: {...}}`. The SDK finds no top-level `error`, concludes there is no
+// body, and surfaces "429 status code (no body)" -- discarding the message that
+// said what was limited and when to retry. Seen live from this endpoint.
+{
+  const gemini429 = {
+    status: 429,
+    message: "429 status code (no body)",
+    // What the SDK attaches for a body it could not interpret.
+    error: [
+      {
+        error: {
+          code: 429,
+          message: "You exceeded your current quota. Please retry in 30.5s.",
+          status: "RESOURCE_EXHAUSTED",
+        },
+      },
+    ],
+  };
+
+  const inner = providerError(gemini429);
+  assert.ok(inner, "the provider's error object is recovered");
+  assert.equal(inner.status, "RESOURCE_EXHAUSTED");
+
+  const msg = explainRejection(gemini429);
+  assert.ok(/rate limit/i.test(msg), `still classified as a rate limit: ${msg}`);
+  assert.ok(/RESOURCE_EXHAUSTED/.test(msg), `the provider's own label survives: ${msg}`);
+  assert.ok(/retry in 30\.5s/i.test(msg), `and its retry instruction: ${msg}`);
+  assert.ok(!/no body/.test(msg), "the SDK's shrug is not passed on as the explanation");
+
+  // And the hint is found in that recovered text, so the wait is right.
+  assert.equal(retryHintMs(gemini429), 30_500);
+}
+
+{
+  // A plain object body -- the shape the SDK does handle -- still works.
+  const normal = { status: 429, message: "429", error: { error: { message: "slow down, retry in 5s" } } };
+  assert.equal(retryHintMs(normal), 5_000);
+  assert.equal(providerError(normal)?.message, "slow down, retry in 5s");
+}
+
+{
+  // Nothing recoverable: no throw, no invented text.
+  assert.equal(providerError({ status: 429, message: "429 status code (no body)" }), null);
+  const msg = explainRejection({ status: 429, message: "429 status code (no body)" });
+  assert.ok(msg.length > 0);
+  assert.ok(!/no body/.test(msg), "a bare SDK message is not presented as the provider's");
+}
+
+// --- recovering a body the SDK threw away --------------------------------
+//
+// Gemini returns `[{error: {...}}]`; the SDK expects `{error: {...}}` and gives
+// up, leaving `err.error` undefined and the message "429 status code (no body)".
+// `recordingFetch` reads the raw body before that happens.
+{
+  const realFetch = globalThis.fetch;
+  const { recordingFetch } = await import("../src/agent.js");
+
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify([{ error: { code: 429, message: "Please retry in 12s.", status: "RESOURCE_EXHAUSTED" } }]),
+      { status: 429 }
+    )) as typeof fetch;
+
+  const recording = recordingFetch();
+  await recording("https://example.invalid/v1/chat/completions", { method: "POST" });
+  globalThis.fetch = realFetch;
+
+  const err = { status: 429, message: "429 status code (no body)" };
+  const inner = providerError(err);
+  assert.ok(inner, "the discarded body is recovered");
+  assert.equal(inner.status, "RESOURCE_EXHAUSTED");
+  assert.equal(retryHintMs(err), 12_000, "and its retry hint is usable");
+
+  const msg = explainRejection(err);
+  assert.ok(/RESOURCE_EXHAUSTED/.test(msg), `provider label survives: ${msg}`);
+  assert.ok(!/no body/.test(msg), "the SDK's shrug is not passed on");
+}
+
+{
+  // A successful response must not be touched or buffered.
+  const realFetch = globalThis.fetch;
+  const { recordingFetch } = await import("../src/agent.js");
+  globalThis.fetch = (async () => new Response("ok", { status: 200 })) as typeof fetch;
+  const recording = recordingFetch();
+  const res = await recording("https://example.invalid/v1/chat/completions", {});
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), "ok", "the body is still readable by the caller");
+  globalThis.fetch = realFetch;
 }
 
 console.log("retry.test.ts: ok");
