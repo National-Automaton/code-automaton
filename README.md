@@ -131,6 +131,26 @@ independent of streaming: a reply that is still arriving keeps appending at the
 tail without yanking you back down, so you can read earlier output while the
 model is still writing.
 
+### Rate limits
+
+A `429` from a provider is usually a **rate** limit, not a billing problem — and
+the two look identical if you only show the status code. Coda retries with the
+delay the provider asks for (`Retry-After`, `x-ratelimit-reset-*`, or the
+"retry in 30.5s" in Gemini's own message), backing off 1s → 4s → 10s when it
+says nothing, capped at 30s so a turn cannot appear to hang.
+
+When the retries run out, the message says which it was:
+
+```
+error: gemini-3.6-flash failed after 4 attempts.
+  Rate limited by the provider. Retry in about 31s.
+  You exceeded your current quota. Please retry in 30.5s.
+```
+
+"Quota" in a provider's wording does not imply money: Gemini uses it for
+per-minute limits too. Coda only says "billing" when the provider mentions
+billing, a credit balance, or payment.
+
 ### Token usage
 
 Each assistant reply records what the provider said it cost, in
@@ -589,6 +609,60 @@ model has finished writing:
   approve another, and a new session starts over.
 - **Output is scrubbed.** A child that echoes its credential still produces a
   redacted tool result.
+
+#### Logging in: `run_interactive`
+
+Some commands need the terminal itself — `gh auth login`, `aws sso login`,
+`gcloud auth login`, `docker login`. They prompt with arrow keys, open a
+browser, print a code. Coda's tools spawn children without a TTY, so those
+commands could not run at all.
+
+`run_interactive` hands your terminal to the command:
+
+```
+Hand the terminal to this command until it exits?
+  gh auth login
+  coda stops drawing while it runs; your keystrokes go to it.
+run this command?   y = once · a = always · n / Esc = no
+```
+
+- **Approved every time, per call.** There is no list of blessed commands to
+  keep up to date — that would need a code change per new tool, and an entry
+  approved once could be re-run later without asking.
+- **Coda suspends**: mouse reporting and paste are switched off and the terminal
+  returns to cooked mode, so the child gets a real TTY. A banner marks the hand
+  over and the return, written straight to the terminal — a note in coda's frame
+  would never be seen, since nothing is drawn while the child has the screen:
+
+  ```
+  ────────────────────────────────────────────────
+    terminal handed to: gh auth login
+    coda is suspended. Finish there, or press Ctrl+C to abort.
+  ────────────────────────────────────────────────
+
+  … the command's own output …
+
+  ────────────────────────────────────────────────
+    back in coda -- gh auth login exited 0
+  ────────────────────────────────────────────────
+  ```
+
+  The command's output stays in the terminal's scrollback; coda redraws over
+  the screen when it returns.
+- **You see the exit status, not the output.** The child writes straight to the
+  screen, so coda never captures it — and a login prints a URL and sometimes a
+  one-time code, which has no business in a transcript that is saved and
+  re-sent as history.
+- **Ctrl+C stops the command, not coda** while it has the terminal.
+- **Credentials are refused.** A known secret, or a `{{secret:NAME}}`
+  placeholder, is rejected: substitution and output redaction belong to
+  `use_secret`, and an interactive child's output is not redacted.
+- **Exclusive.** Refused while another session is still mid-turn, because that
+  session repaints the frame and would paint over the child's prompt.
+
+A command that never exits (`npm run dev`) is not handled yet: the handover
+waits for the process to end, so there is no way to say "it is running, carry
+on".
 
 #### Why `bash` cannot see vault credentials
 
