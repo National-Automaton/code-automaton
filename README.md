@@ -131,6 +131,43 @@ independent of streaming: a reply that is still arriving keeps appending at the
 tail without yanking you back down, so you can read earlier output while the
 model is still writing.
 
+### Running a command yourself: `!`
+
+A line beginning with `!` runs in the shell instead of going to the agent:
+
+```
+!git status
+!npm test 2>&1 | tail -20
+```
+
+- **No approval, no model round trip.** You typed it, so it runs. Nothing is
+  sent to the agent, and no tokens are spent.
+- **Output is redacted**, like every other transcript entry: a command that
+  prints a vault credential shows `[redacted]`. That includes the echoed
+  command line itself, so `!curl -u user:token …` shows `[redacted]` where the
+  token was — you will not see what you typed, which is the price of never
+  writing it to disk.
+- **It runs in a shell** (`sh -c`), so pipes and redirection work.
+
+#### When the command needs a terminal
+
+`!` runs commands with no TTY, so anything that prompts — a login, a password,
+an editor — cannot work that way. Rather than guess from the command's name
+(a list that goes stale), coda runs it normally and **offers** the handover if
+it produces no output and fails, which is the shape of a command waiting for
+input:
+
+```
+that produced no output and did not succeed -- it may need a terminal
+(a login, a password prompt). /run again with the terminal, or Esc to forget it:
+  !terminal gh auth login
+```
+
+`!terminal <command>` goes straight to the handover, with the same banners and
+the same Ctrl+C behaviour as the agent's `run_interactive`. A command that has
+already run is never re-run automatically: it may have done work before it
+started prompting, so the offer is a fresh run you choose.
+
 ### Rate limits
 
 A `429` from a provider is usually a **rate** limit, not a billing problem — and
