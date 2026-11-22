@@ -638,6 +638,44 @@ export class Agent {
     // the `use_secret` prompt deliberately -- one approval UI, one habit.
     if (name === "new_session") return this.openNewSession(args);
 
+    // `run_interactive` hands the *terminal* to a child, so the decision belongs
+    // to the app, which owns the screen. Validate the request here, then let
+    // the app ask and perform the handover; nothing has run at this point.
+    if (name === "run_interactive") {
+      const prepared = await runTool(name, args);
+      if (!prepared.ok || !prepared.interactive) return prepared;
+      const argv = prepared.interactive.argv;
+      if (!this.confirm) {
+        return {
+          ok: false,
+          output:
+            "run_interactive: needs the user to hand over the terminal, and this " +
+            "session cannot ask. Refused.",
+        };
+      }
+      const summary =
+        "Hand the terminal to this command until it exits?\n" +
+        `  ${argv.join(" ")}\n` +
+        "  coda stops drawing while it runs; your keystrokes go to it.";
+      // Reuses the approval prompt deliberately: one way to be asked, one habit.
+      const answer = await this.confirm(summary, []);
+      if (answer === "no") {
+        return {
+          ok: false,
+          output:
+            "run_interactive: the user declined to hand over the terminal. Do not " +
+            "retry in this turn; ask them how they would like to proceed.",
+        };
+      }
+      if (!this.handOver) {
+        return {
+          ok: false,
+          output: "run_interactive: this session cannot hand over the terminal.",
+        };
+      }
+      return this.handOver(argv);
+    }
+
     if (name !== "use_secret") return runTool(name, args);
 
     const argv: string[] = Array.isArray(args?.command) ? args.command.map(String) : [];
@@ -703,6 +741,22 @@ export class Agent {
   private confirm:
     | ((summary: string, secrets: string[]) => Promise<"yes" | "no" | "always">)
     | null = null;
+
+  /**
+   * Performs the handover: suspend the UI, run `argv` on the terminal, restore.
+   *
+   * Installed by the caller for the same reason as `confirm` -- `Agent` has no
+   * terminal. Resolves with the tool result, which carries the exit status and
+   * no output: an interactive child writes straight to the screen, so anything
+   * it printed is unscannable and a login prints things that must not be kept.
+   */
+  private handOver:
+    | ((argv: string[]) => Promise<ToolResult>)
+    | null = null;
+
+  setHandOver(fn: ((argv: string[]) => Promise<ToolResult>) | null): void {
+    this.handOver = fn;
+  }
 
   /** Install the approval prompt. */
   setConfirm(

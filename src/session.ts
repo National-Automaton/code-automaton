@@ -5,6 +5,7 @@ import {
   isRequestRejection,
 } from "./agent.js";
 import type { AttachedImage } from "./image.js";
+import type { ToolResult } from "./tools.js";
 import type { EntryUsage } from "./store.js";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { Config } from "./config.js";
@@ -434,7 +435,8 @@ export class Session {
     onUpdate: () => void,
     images: AttachedImage[] = [],
     confirm?: (summary: string, secrets: string[]) => Promise<"yes" | "no" | "always">,
-    askSecret?: (name: string, label: string, hidden: boolean) => Promise<string | null>
+    askSecret?: (name: string, label: string, hidden: boolean) => Promise<string | null>,
+    handOver?: (argv: string[]) => Promise<ToolResult>
   ): Promise<{ newSession?: { title?: string; preamble?: string } }> {
     this.status = "thinking";
     // Recorded before the first request so a kill at any point during the turn
@@ -453,6 +455,9 @@ export class Session {
     this.agent.setConfirm(confirm ?? null);
     // Same reasoning: collecting a credential the task needs is a UI job.
     this.agent.setAskSecret(askSecret ?? null);
+    // And handing the terminal to a child is the most UI-shaped job of all --
+    // it stops the screen being drawn. A run without one simply cannot do it.
+    this.agent.setHandOver(handOver ?? null);
     // Show the attachment in the transcript so it is clear what was sent; the
     // pixels themselves never go in the entry list.
     const label = images.length
