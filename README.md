@@ -153,15 +153,24 @@ A line beginning with `!` runs in the shell instead of going to the agent:
 
 `!` runs commands with no TTY, so anything that prompts — a login, a password,
 an editor — cannot work that way. Rather than guess from the command's name
-(a list that goes stale), coda runs it normally and **offers** the handover if
-it produces no output and fails, which is the shape of a command waiting for
-input:
+(a list that goes stale), coda watches what happens, and offers the handover in
+two different situations:
+
+**It finished immediately with no output and failed** — the command said it
+could not work, so the offer is immediate:
 
 ```
 that produced no output and did not succeed -- it may need a terminal
-(a login, a password prompt). /run again with the terminal, or Esc to forget it:
+(a login, a password prompt). Run it again with one:
   !terminal gh auth login
 ```
+
+**It is still running but has produced nothing for a few seconds** — the
+ambiguous case. A *silence* timer, reset by every byte of output, so a command
+that keeps talking is never flagged however long it runs (`npm test` is safe),
+while one that blocks silently is noticed in seconds. Nothing is killed; the
+offer appears alongside the running command and you decide whether to `Ctrl+C`
+and re-run it with `!terminal`.
 
 `!terminal <command>` goes straight to the handover, with the same banners and
 the same Ctrl+C behaviour as the agent's `run_interactive`. A command that has

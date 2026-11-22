@@ -85,6 +85,38 @@ const lastNote = (a: any) => {
   assert.ok(/!terminal/.test(t), "and it says how");
 }
 
+// --- a silent command that is still running is offered, not killed --------
+
+{
+  const a = app();
+  const started = Date.now();
+  // Silent for longer than the 3s silence window, then finishes on its own.
+  await a.runBangCommand("!sleep 4; echo done-after-sleep");
+  const elapsed = Date.now() - started;
+
+  const t = transcript(a);
+  assert.ok(/no output for a few seconds/i.test(t),
+    "the offer appears while it is still running");
+  assert.ok(/done-after-sleep/.test(t),
+    `and the command was NOT killed -- it finished: ${t}`);
+  assert.ok(elapsed >= 3_500, `it ran to completion (${elapsed}ms)`);
+  assert.ok(/finished/.test(t), "and the end is reported");
+}
+
+// --- a chatty command is never flagged, however long it runs --------------
+
+{
+  const a = app();
+  // Prints every second for 3.5s: each line resets the silence window, so the
+  // "waiting for input" offer must never appear. This is the case a flat
+  // deadline would have got wrong.
+  await a.runBangCommand("!for i in 1 2 3; do echo tick-$i; sleep 1; done");
+  const t = transcript(a);
+  assert.ok(/tick-3/.test(t), "it ran to the end");
+  assert.ok(!/no output for a few seconds/i.test(t),
+    `a command producing output is not treated as waiting: ${t}`);
+}
+
 // --- a successful command with no output does not -------------------------
 
 {

@@ -2246,39 +2246,74 @@ export class App {
     this.systemNote(`$ ${command}`);
     this.requestRender();
 
-    // Short grace period: long enough for `git status`, short enough that a
-    // command waiting for input is noticed rather than looking like a hang.
-    const GRACE_MS = 8_000;
-    const outcome = await new Promise<{ ok: boolean; output: string; timedOut: boolean }>(
-      (resolve) => {
-        let out = "";
-        let settled = false;
-        const finish = (ok: boolean, timedOut = false) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          resolve({ ok, output: out, timedOut });
-        };
-        const child = spawn(command, {
-          cwd: process.cwd(),
-          shell: true,
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        this.bangChild = child;
-        child.stdout?.on("data", (d) => (out += d.toString()));
-        child.stderr?.on("data", (d) => (out += d.toString()));
-        child.on("error", (err: any) => {
-          out += `${err?.message ?? err}`;
-          finish(false);
-        });
-        child.on("exit", (code) => finish(code === 0));
-        const timer = setTimeout(() => {
-          child.kill("SIGKILL");
-          finish(false, true);
-        }, GRACE_MS);
-        timer.unref?.();
-      }
-    );
+    /*
+     * Two different signals, handled differently.
+     *
+     * "Produced nothing and exited non-zero" is a *finished* observation -- the
+     * command told us it failed -- so the offer can be made at once, with no
+     * timer involved.
+     *
+     * "Still running, producing nothing" is genuinely ambiguous, and is the only
+     * case a timer helps. It is a SILENCE timer, reset by every byte of output,
+     * not a deadline from spawn: `npm test` that runs for two minutes is fine as
+     * long as it keeps talking, while `gh auth login` blocks in silence and gets
+     * noticed in seconds. A flat deadline cannot tell those apart.
+     *
+     * Neither case kills the command. A quiet-but-working command is not
+     * interrupted; the offer appears alongside it and the user decides.
+     */
+    const SILENCE_MS = 3_000;
+    const outcome = await new Promise<{
+      ok: boolean;
+      output: string;
+      exited: boolean;
+      quiet: boolean;
+    }>((resolve) => {
+      let out = "";
+      let settled = false;
+      let quiet = false;
+
+      const finish = (ok: boolean, exited: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(silence);
+        resolve({ ok, output: out, exited, quiet });
+      };
+
+      // Fires once, the first time the command has been silent for SILENCE_MS.
+      // It does not end the command: it records that the offer is due and then
+      // waits for the command to finish on its own.
+      let silence: ReturnType<typeof setTimeout>;
+      const armSilence = () => {
+        clearTimeout(silence);
+        silence = setTimeout(() => {
+          quiet = true;
+          this.noteQuietCommand(command);
+        }, SILENCE_MS);
+        silence.unref?.();
+      };
+
+      const child = spawn(command, {
+        cwd: process.cwd(),
+        shell: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      this.bangChild = child;
+      const collect = (d: Buffer) => {
+        out += d.toString();
+        // Output means it is working, so the silence window restarts.
+        if (!quiet) armSilence();
+      };
+      child.stdout?.on("data", collect);
+      child.stderr?.on("data", collect);
+      armSilence();
+
+      child.on("error", (err: any) => {
+        out += `${err?.message ?? err}`;
+        finish(false, true);
+      });
+      child.on("exit", (code) => finish(code === 0, true));
+    });
     this.bangChild = null;
 
     // `systemNote` redacts on the way in, so this output is protected exactly
@@ -2288,20 +2323,35 @@ export class App {
     if (body) this.systemNote(body);
     this.requestRender();
 
-    // Looks like it wanted a terminal: no output at all, and either it was
-    // killed for hanging or it exited non-zero immediately. Offer, never assume
-    // -- and offer a *re-run*, because the tool has no way to resume a command
-    // that already started.
-    const wantedTerminal = !body && !outcome.ok;
-    if (!wantedTerminal) {
-      if (!outcome.ok && !body) this.systemNote(`(exited non-zero)`);
+    // The quiet offer already appeared while it ran; say how it ended.
+    if (outcome.quiet) {
+      this.systemNote(
+        outcome.ok ? "(finished)" : "(finished, non-zero) -- if it was waiting for input, use:\n" +
+          `  !terminal ${command}`
+      );
       return;
     }
 
+    // Finished immediately with nothing to show and a failure: the shape of a
+    // command that wanted a terminal and could not get one.
+    if (!body && !outcome.ok) {
+      this.systemNote(
+        "that produced no output and did not succeed -- it may need a terminal " +
+          "(a login, a password prompt). Run it again with one:\n" +
+          `  !terminal ${command}`
+      );
+      this.requestRender();
+    }
+  }
+
+  /**
+   * Say, while a `!` command is still running silently, that it may be waiting
+   * for input -- without interrupting it.
+   */
+  private noteQuietCommand(command: string): void {
     this.systemNote(
-      "that produced no output and did not succeed -- it may need a terminal " +
-        "(a login, a password prompt). /run again with the terminal, or Esc to forget it:\n" +
-        `  !terminal ${command}`
+      `(no output for a few seconds -- still running. If it is waiting for input, ` +
+        `Ctrl+C and run it with the terminal:\n  !terminal ${command})`
     );
     this.requestRender();
   }
