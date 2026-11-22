@@ -853,6 +853,67 @@ for (const size of [
   );
 }
 
+// Every model-picker *state*, at every size -- not just the default one.
+//
+// The invariants in `checkFrame` (one paint, frame fits, no row reaches the
+// last column) only protect a state they are actually pointed at. This overlay
+// grew several states after that sweep was written -- an empty image column, a
+// pinned endpoint, long ids with endpoint tags, a list too long for the screen
+// -- and each is a place a row can overflow and wrap, which shifts the whole
+// frame. Two rendering bugs reached the user from this overlay; neither would
+// survive this loop.
+{
+  const long = (n: number) => "x".repeat(n);
+  const states: Array<[string, Parameters<typeof modelState>[0], any]> = [
+    ["default", 1, {}],
+    // A pinned endpoint: the footer banner is longer than any other note.
+    ["pinned endpoint", 1, {
+      endpoint: "openrouter",
+      multi: true,
+      models: [
+        { id: "deepseek-flash", vision: false, endpoint: null },
+        { id: "grok-4", vision: false, endpoint: "openrouter" },
+      ],
+    }],
+    // Nothing image-capable, so the right column is empty.
+    ["no image models", 0, { vision: [], visionIndex: 0 }],
+    // Exactly one, where left/right has nothing to move between.
+    ["one image model", 0, { vision: ["gemini-3.6-flash"], visionIndex: 0 }],
+    // Long ids plus endpoint tags: the label is longest here.
+    ["long ids", 0, {
+      multi: true,
+      models: [
+        { id: `claude-${long(40)}`, vision: false, endpoint: "openrouter" },
+        { id: `gemini-${long(40)}`, vision: true, endpoint: "gemini" },
+      ],
+      vision: [`gemini-${long(40)}`, `gemini-${long(50)}`],
+    }],
+    // More rows than fit, so the scroll window is in play.
+    ["scrolling list", 20, {
+      models: Array.from({ length: 40 }, (_, i) => ({
+        id: `model-${i}`, vision: i % 3 === 0, endpoint: i % 2 ? "grok" : null,
+      })),
+      multi: true,
+      vision: Array.from({ length: 40 }, (_, i) => `gemini-vision-${i}`),
+      visionIndex: 25,
+    }],
+  ];
+
+  for (const [name, index, patch] of states) {
+    for (const size of SIZES) {
+      const state: any = modelState(typeof index === "number" ? index : 1);
+      Object.assign(state.modelPicker, patch);
+      // Keep the cursor inside whatever list the state actually has.
+      state.modelPicker.index = Math.min(
+        state.modelPicker.index,
+        Math.max(0, state.modelPicker.models.length - 1)
+      );
+      const frame = renderAt(size.cols, size.rows, screenAt(size.cols, size.rows), state);
+      checkFrame(frame, size, `model/${name} ${size.cols}x${size.rows}`);
+    }
+  }
+}
+
 // The `/model` overlay: a second full-screen frame. It shares the picker's
 // layout code but not its widths, so it gets the same size sweep.
 for (const size of SIZES) {
