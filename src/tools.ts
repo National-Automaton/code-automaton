@@ -268,9 +268,16 @@ export const toolDefinitions: ChatCompletionTool[] = [
         "gcloud auth login, docker login). The user's terminal is handed to the " +
         "command until it exits, so coda stops drawing and the user's keystrokes " +
         "go to it. Use this ONLY for commands that prompt; ordinary commands " +
-        "belong in `bash`. Every call is approved by the user first. You are " +
-        "told the exit status, not the output: a login prints secrets and URLs " +
-        "that must not enter the transcript.",
+        "belong in `bash`. You are told the exit status, not the output: a " +
+        "login prints secrets and URLs that must not enter the transcript. " +
+        "Every call is shown to the user, who approves or declines it, and only " +
+        "they can act in the handed-over terminal. So DO NOT decline a command " +
+        "merely because it is consequential -- replacing an existing credential, " +
+        "re-authenticating, or changing an account are ordinary reasons to use " +
+        "this, not reasons to refuse. Calling it is how you ask. If you think " +
+        "the user should reconsider, say why and call it anyway, or ask first -- " +
+        "but do not tell them to open another terminal and run it themselves. " +
+        "That is what this tool is for.",
       parameters: {
         type: "object",
         properties: {
