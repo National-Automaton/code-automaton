@@ -220,6 +220,8 @@ export class App {
   private handedOver = false;
   /** The interactive child, so Ctrl+C can kill it rather than coda. */
   private handoverChild: ReturnType<typeof spawn> | null = null;
+  /** A `!command` child, while it runs, for the same reason. */
+  private bangChild: ReturnType<typeof spawn> | null = null;
 
   private modelPicker: {
     catalogue: ModelCatalog;
@@ -295,6 +297,12 @@ export class App {
     process.on("SIGINT", () => {
       if (this.handoverChild) {
         this.handoverChild.kill("SIGINT");
+        return;
+      }
+      // A `!` command is the user's own, and Ctrl+C means "stop that" for the
+      // same reason it does during a handover.
+      if (this.bangChild) {
+        this.bangChild.kill("SIGTERM");
         return;
       }
       flushAndExit();
@@ -1417,6 +1425,12 @@ export class App {
       this.runSlashCommand(text.trim());
       return;
     }
+    // Same for a `!` command typed as a session's very first message: it is a
+    // shell command, not a prompt, whichever path it arrives by.
+    if (text.trimStart().startsWith("!")) {
+      void this.runBangCommand(text.trim());
+      return;
+    }
     this.pruneEmptySessions();
     const leaving = this.current();
     const session = new Session(this.config);
@@ -2202,6 +2216,168 @@ export class App {
     return text.startsWith("/") && text.length > 1;
   }
 
+  /**
+   * `/run` — run a command you typed, in the shell, without the agent.
+   *
+   * The same mechanism as the agent's `run_interactive`, but initiated by you,
+   * so there is nothing to approve: you typed it. Two shapes, one syntax:
+   *
+   *  - a normal command runs in a shell with its output captured, exactly like
+   *    the `bash` tool, so quick things (`!git status`) behave as expected;
+   *  - a command that needs a terminal gets the handover, because it is the
+   *    only way interactive prompts work at all.
+   *
+   * Which one is not guessed from the command's name -- that kind of list is
+   * what went stale in #88. Instead the command is run normally and, if it
+   * fails or hangs without producing anything, the handover is *offered*. A
+   * command that already ran is never re-run automatically: that could repeat
+   * whatever it did before it started prompting.
+   */
+  private async runBangCommand(line: string): Promise<void> {
+    const command = line.replace(/^!+/, "").trim();
+    if (!command) {
+      this.systemNote("usage: !<command>   (runs in the shell; needs a terminal? it is offered one)");
+      this.requestRender();
+      return;
+    }
+
+    this.input.clear();
+    this.recall.reset();
+    this.systemNote(`$ ${command}`);
+    this.requestRender();
+
+    /*
+     * Two different signals, handled differently.
+     *
+     * "Produced nothing and exited non-zero" is a *finished* observation -- the
+     * command told us it failed -- so the offer can be made at once, with no
+     * timer involved.
+     *
+     * "Still running, producing nothing" is genuinely ambiguous, and is the only
+     * case a timer helps. It is a SILENCE timer, reset by every byte of output,
+     * not a deadline from spawn: `npm test` that runs for two minutes is fine as
+     * long as it keeps talking, while `gh auth login` blocks in silence and gets
+     * noticed in seconds. A flat deadline cannot tell those apart.
+     *
+     * Neither case kills the command. A quiet-but-working command is not
+     * interrupted; the offer appears alongside it and the user decides.
+     */
+    const SILENCE_MS = 3_000;
+    const outcome = await new Promise<{
+      ok: boolean;
+      output: string;
+      exited: boolean;
+      quiet: boolean;
+    }>((resolve) => {
+      let out = "";
+      let settled = false;
+      let quiet = false;
+
+      const finish = (ok: boolean, exited: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(silence);
+        resolve({ ok, output: out, exited, quiet });
+      };
+
+      // Fires once, the first time the command has been silent for SILENCE_MS.
+      // It does not end the command: it records that the offer is due and then
+      // waits for the command to finish on its own.
+      let silence: ReturnType<typeof setTimeout>;
+      const armSilence = () => {
+        clearTimeout(silence);
+        silence = setTimeout(() => {
+          quiet = true;
+          this.noteQuietCommand(command);
+        }, SILENCE_MS);
+        silence.unref?.();
+      };
+
+      const child = spawn(command, {
+        cwd: process.cwd(),
+        shell: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      this.bangChild = child;
+      const collect = (d: Buffer) => {
+        out += d.toString();
+        // Output means it is working, so the silence window restarts.
+        if (!quiet) armSilence();
+      };
+      child.stdout?.on("data", collect);
+      child.stderr?.on("data", collect);
+      armSilence();
+
+      child.on("error", (err: any) => {
+        out += `${err?.message ?? err}`;
+        finish(false, true);
+      });
+      child.on("exit", (code) => finish(code === 0, true));
+    });
+    this.bangChild = null;
+
+    // `systemNote` redacts on the way in, so this output is protected exactly
+    // like a tool result -- the hole that would otherwise make `!` the one path
+    // that can put a credential in the transcript.
+    const body = outcome.output.trim();
+    if (body) this.systemNote(body);
+    this.requestRender();
+
+    // The quiet offer already appeared while it ran; say how it ended.
+    if (outcome.quiet) {
+      this.systemNote(
+        outcome.ok ? "(finished)" : "(finished, non-zero) -- if it was waiting for input, use:\n" +
+          `  !terminal ${command}`
+      );
+      return;
+    }
+
+    // Finished immediately with nothing to show and a failure: the shape of a
+    // command that wanted a terminal and could not get one.
+    if (!body && !outcome.ok) {
+      this.systemNote(
+        "that produced no output and did not succeed -- it may need a terminal " +
+          "(a login, a password prompt). Run it again with one:\n" +
+          `  !terminal ${command}`
+      );
+      this.requestRender();
+    }
+  }
+
+  /**
+   * Say, while a `!` command is still running silently, that it may be waiting
+   * for input -- without interrupting it.
+   */
+  private noteQuietCommand(command: string): void {
+    this.systemNote(
+      `(no output for a few seconds -- still running. If it is waiting for input, ` +
+        `Ctrl+C and run it with the terminal:\n  !terminal ${command})`
+    );
+    this.requestRender();
+  }
+
+  /**
+   * `/run --terminal` (or `!terminal <cmd>`) — hand the terminal over directly.
+   *
+   * The explicit form, for when the auto-detection above gets it wrong or the
+   * command is known to prompt.
+   */
+  private async runWithTerminal(command: string): Promise<void> {
+    if (!command.trim()) {
+      this.systemNote("usage: !terminal <command>");
+      this.requestRender();
+      return;
+    }
+    this.input.clear();
+    this.recall.reset();
+    this.systemNote(`$ ${command}   (terminal)`);
+    // Reuse the agent's handover: one implementation of suspend/restore, so a
+    // bug in it cannot differ between the two entry points.
+    const res = await this.handOverTerminal(["sh", "-c", command]);
+    this.systemNote(res.output);
+    this.requestRender();
+  }
+
   private submit(): void {
     const text = this.input.value.trim();
     if (!text) return;
@@ -2209,6 +2385,19 @@ export class App {
     // Slash input is always a command, never a prompt.
     if (this.looksLikeCommand(text)) {
       this.runSlashCommand(text);
+      return;
+    }
+
+    // A leading `!` runs the rest in the shell: the escape hatch for "I know
+    // what I want, do not route this through the model". Checked before the
+    // prompt path so `!` can never reach the agent as prose.
+    if (text.startsWith("!")) {
+      const rest = text.replace(/^!+/, "").trim();
+      if (/^terminal\s+/i.test(rest)) {
+        void this.runWithTerminal(rest.replace(/^terminal\s+/i, ""));
+      } else {
+        void this.runBangCommand(text);
+      }
       return;
     }
 
