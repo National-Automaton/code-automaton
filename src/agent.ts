@@ -60,6 +60,229 @@ export class RequestRejectedError extends Error {
  * are upstream failures the retry helper already handles, and the turn is
  * genuinely in doubt rather than plainly refused.
  */
+/**
+ * How long a 429 or 503 asks to be waited out, in milliseconds.
+ *
+ * Providers say so in one of three places and none is universal:
+ *
+ *  - `Retry-After`, the standard header, in seconds (or an HTTP date).
+ *  - `x-ratelimit-reset-*` / `x-ratelimit-reset`, also seconds.
+ *  - The body. Gemini's `RESOURCE_EXHAUSTED` message spells out both the quota
+ *    window ("per minute") and a concrete delay ("Please retry in 30.5s"), and
+ *    its free tier's per-minute limits are what a burst of screenshot questions
+ *    hits.
+ *
+ * Returns null when the provider says nothing, in which case the caller falls
+ * back to its own backoff. Capped by the caller, not here.
+ */
+/**
+ * The longest coda will wait inside a turn.
+ *
+ * A provider can ask for minutes; holding a turn open that long looks like a
+ * hang, and the user cannot cancel a sleep. Past this the request fails with an
+ * explanation instead, which is honest and immediate.
+ */
+const MAX_RETRY_WAIT_MS = 30_000;
+
+export function retryHintMs(err: any): number | null {
+  const headers = err?.headers ?? err?.response?.headers;
+  const header = (name: string): string | null => {
+    try {
+      if (!headers) return null;
+      // The SDK's Headers mirrors the fetch one, but a plain object is possible
+      // too; both support get() or a lower-cased index.
+      if (typeof headers.get === "function") return headers.get(name);
+      return headers[name] ?? headers[name.toLowerCase()] ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const seconds = (v: string | null): number | null => {
+    if (!v) return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n * 1000 : null;
+  };
+
+  const after = seconds(header("retry-after"));
+  if (after !== null) return after;
+
+  for (const name of [
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-reset-tokens",
+    "x-ratelimit-reset",
+  ]) {
+    const ms = seconds(header(name));
+    if (ms !== null) return ms;
+  }
+
+  // The body: "Please retry in 30.5s" is the clearest signal there is. Read it
+  // from the provider's own error object when the SDK discarded it -- Gemini's
+  // array-shaped errors arrive as "no body" otherwise.
+  const message = providerMessage(err) || String(err?.message ?? "");
+  const inMessage = /retry in ([0-9]+(?:\.[0-9]+)?)\s*s/i.exec(message);
+  if (inMessage) {
+    const n = Number(inMessage[1]);
+    if (Number.isFinite(n)) return Math.round(n * 1000);
+  }
+  return null;
+}
+
+/**
+ * A one-line explanation of *why* a request was refused, for the user.
+ *
+ * A bare 429 reads as a billing problem and sends people to check their
+ * balance; Gemini's per-minute rate limit is neither billing nor an outage. The
+ * provider usually says which it is, so say it back rather than making them
+ * guess.
+ */
+/**
+ * The provider's own error object, when the SDK lost it.
+ *
+ * Google's OpenAI-compatible endpoint returns errors as a JSON **array** --
+ * `[{"error": {"code": 429, "message": "…", "status": "RESOURCE_EXHAUSTED"}}]`
+ * -- where the SDK expects `{"error": …}`. It finds no `error` key, decides
+ * there is no body, and reports a bare `429 status code (no body)`: the
+ * provider's explanation of *what* was limited and *when* to retry is thrown
+ * away before anything can use it.
+ *
+ * This digs the object out of whatever the SDK left on the error, so the
+ * message and the retry hint survive.
+ */
+/**
+ * Provider messages recovered from raw error bodies, keyed by status+request id.
+ *
+ * The SDK discards bodies it cannot parse, and Google's OpenAI-compatible
+ * endpoint returns `[{error: {...}}]` -- an array where the SDK expects an
+ * object -- so the explanation is gone by the time anything downstream can look
+ * at `err`. A plain `err.error` is `undefined` and the message reads
+ * "429 status code (no body)".
+ *
+ * Rather than discard it too, the body is read once here and kept. Keyed
+ * loosely because the error and the response are joined only by the request;
+ * a handful of entries is all that can be in flight, and old ones are dropped.
+ */
+const recoveredBodies = new Map<string, any>();
+
+function bodyKey(res: Response, text: string): string {
+  return `${res.status}\u0000${text.slice(0, 200)}`;
+}
+
+/**
+ * `fetch` for the OpenAI clients that remembers unparseable error bodies.
+ *
+ * Wraps the platform fetch rather than replacing it: the response is handed to
+ * the SDK untouched, and the clone is read only when the status is an error --
+ * so a successful stream costs nothing beyond a clone.
+ */
+export function recordingFetch(): typeof fetch {
+  return (async (input: any, init?: any) => {
+    const res = await globalThis.fetch(input, init);
+    if (res.ok) return res;
+    try {
+      const copy = res.clone();
+      const text = await copy.text();
+      if (text) {
+        recoveredBodies.set(bodyKey(res, text), text);
+        // Bound the map: these are only ever read moments after the error.
+        if (recoveredBodies.size > 32) {
+          const first = recoveredBodies.keys().next().value;
+          if (first !== undefined) recoveredBodies.delete(first);
+        }
+      }
+    } catch {
+      // A body that cannot be read is the situation this is trying to improve,
+      // not one to fail the request over.
+    }
+    return res;
+  }) as typeof fetch;
+}
+
+/** Parse a recovered raw body into the provider's error object, if possible. */
+function parseRecovered(text: string): any {
+  try {
+    const j = JSON.parse(text);
+    const first = Array.isArray(j) ? j[0] : j;
+    if (first && typeof first === "object") {
+      return first.error && typeof first.error === "object" ? first.error : first;
+    }
+  } catch {
+    // Not JSON -- some providers send plain text. Hand it back as the message.
+    return text.trim() ? { message: text.trim() } : null;
+  }
+  return null;
+}
+
+export function providerError(err: any): any {
+  // Bodies the SDK could not parse, kept by `recordingFetch`. Checked first:
+  // when it has one it is the provider's own words, which beats a derived
+  // message every time.
+  if (recoveredBodies.size) {
+    for (const [k, text] of recoveredBodies) {
+      if (k.startsWith(`${err?.status ?? ""}\u0000`)) {
+        const parsed = parseRecovered(text);
+        if (parsed) return parsed;
+      }
+    }
+  }
+
+  const candidates = [err?.error, (err as any)?.response?.data, (err as any)?.body];
+  for (const c of candidates) {
+    const first = Array.isArray(c) ? c[0] : c;
+    if (first && typeof first === "object") {
+      if (first.error && typeof first.error === "object") return first.error;
+      if (first.message || first.status || first.code) return first;
+    }
+  }
+  return null;
+}
+
+/**
+ * Everything the provider said, as one string.
+ *
+ * Concatenates the message with any status/code label, because Gemini puts the
+ * useful part in different places: `RESOURCE_EXHAUSTED` says *what*, the
+ * message says *why* and *when to retry*.
+ */
+function providerMessage(err: any): string {
+  const e = providerError(err);
+  const parts = [
+    e?.message,
+    e?.status,
+    e?.code,
+    typeof err?.message === "string" && !/status code \(no body\)/.test(err.message)
+      ? err.message
+      : null,
+  ];
+  return [...new Set(parts.filter((p): p is string => typeof p === "string" && p.trim() !== ""))]
+    .join(" · ");
+}
+
+export function explainRejection(err: any): string {
+  const status = err?.status ?? err?.response?.status;
+  // Never pass on the SDK's "429 status code (no body)": it tells the user
+  // nothing, and reads like the request was malformed rather than limited.
+  const raw = providerMessage(err) || String(err?.message ?? "");
+  const message = /status code \(no body\)/.test(raw) ? "" : raw.trim();
+  if (status === 429) {
+    const hint = retryHintMs(err);
+    const when = hint !== null ? ` Retry in about ${Math.ceil(hint / 1000)}s.` : "";
+    // Providers are inconsistent here: Gemini says "you exceeded your current
+    // quota" for a per-minute *rate* limit, so the word "quota" proves nothing.
+    // Only billing-shaped words are taken as billing, and a rate hint
+    // ("per minute", "rate", "retry in 30s") overrides them.
+    const billing = /billing|credit balance|insufficient|payment|paid plan/i.test(message);
+    const rateish = /rate|per minute|per day|retry in|too many requests/i.test(message);
+    const isBilling = billing && !rateish;
+    return (
+      (isBilling ? "The provider reports a quota or billing limit." : "Rate limited by the provider.") +
+      when +
+      (message ? `\n  ${message}` : "")
+    );
+  }
+  return message;
+}
+
 export function isRequestRejection(err: any): boolean {
   if (err instanceof RequestRejectedError) return true;
   const status = err?.status ?? err?.response?.status;
@@ -498,12 +721,12 @@ export class Agent {
     this.client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseURL,
-      fetch: globalThis.fetch,
+      fetch: recordingFetch(),
     });
     this.visionClient = new OpenAI({
       apiKey: config.visionApiKey,
       baseURL: config.visionBaseURL,
-      fetch: globalThis.fetch,
+      fetch: recordingFetch(),
     });
     // A resumed session already carries its system prompt, so the user's
     // instructions are not re-applied: the history is what it was, and
@@ -1060,7 +1283,7 @@ export class Agent {
     const client = new OpenAI({
       apiKey: key ?? "",
       baseURL: endpoint.baseURL,
-      fetch: globalThis.fetch,
+      fetch: recordingFetch(),
     });
     this.endpointClients.set(endpoint.name, client);
     return client;
@@ -1452,7 +1675,9 @@ export class Agent {
     model: string,
     emit: (ev: AgentEvent) => void
   ) {
-    const attempts = 3;
+    // Four tries, since a per-minute window needs the waits below to add up to
+    // something. Still bounded: a turn must not hang on a stuck provider.
+    const attempts = 4;
     for (let attempt = 1; ; attempt++) {
       try {
         return await client.chat.completions.create({
@@ -1481,12 +1706,32 @@ export class Agent {
               isMalformedHistoryError(err)
             );
           }
+          // Out of retries on a transient failure: say what it was. A bare 429
+          // reads as a billing problem and sends people to check their balance,
+          // when the provider almost always said "per-minute rate limit, retry
+          // in 30s" in its own message.
+          if (transient) {
+            const why = explainRejection(err);
+            const wrapped = new Error(
+              `${model} failed after ${attempts} attempts.\n  ${why}`,
+              { cause: err }
+            ) as any;
+            wrapped.status = status;
+            throw wrapped;
+          }
           throw err;
         }
-        const waitMs = 500 * 2 ** (attempt - 1);
+        // Prefer the provider's own guidance. The old backoff was 0.5s then
+        // 1s, which cannot outlast the per-minute quota window a 429 usually
+        // means -- so the retries were decorative and the user got a raw 429.
+        const hint = retryHintMs(err);
+        const backoff = [1_000, 4_000, 10_000][attempt - 1] ?? 10_000;
+        const waitMs = Math.min(hint ?? backoff, MAX_RETRY_WAIT_MS);
         emit({
           type: "text",
-          text: `\n[${model} returned ${status}, retrying in ${waitMs / 1000}s (${attempt}/${attempts - 1})]\n`,
+          text:
+            `\n[${model} returned ${status}, retrying in ${Math.round(waitMs / 1000)}s ` +
+            `(${attempt}/${attempts})]\n`,
         });
         await new Promise((r) => setTimeout(r, waitMs));
       }
