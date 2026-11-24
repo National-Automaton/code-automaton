@@ -132,11 +132,37 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   }
 }
 
+/**
+ * Tell the model where `--report-path` expects the file.
+ *
+ * The flag was only ever used to *verify* the result, so an unattended run had
+ * no way to know where it was supposed to write: the model would either guess a
+ * path (and risk overwriting an unrelated file) or, correctly, refuse. Since the
+ * whole point of the flag is "write your answer here", state it in the prompt.
+ *
+ * The text is appended rather than replacing the prompt so a standing prompt
+ * file stays readable and reusable across runs.
+ */
+export function withReportPath(prompt: string, reportPath: string | null): string {
+  if (!reportPath) return prompt;
+  return (
+    prompt.replace(/\s+$/, "") +
+    "\n\nREPORT DESTINATION (supplied by the job runner):\n" +
+    path.resolve(reportPath) +
+    "\nWrite the finished report to exactly that path with write_file. Do not\n" +
+    "choose a different path, and do not write to any other file.\n"
+  );
+}
+
 async function runTurn(
   config: Config,
   opts: HeadlessOptions,
   log: (msg: string) => void
 ): Promise<number> {
+  // Timestamp before anything is written, so `enforceReport` can tell a report
+  // this run produced from one left behind by an earlier run.
+  const startedAt = Date.now();
+
   if (opts.verbose) {
     log(`coda headless: ${describePolicy(opts)}`);
     log(`coda headless: timeout ${Math.round(opts.timeoutMs / 1000)}s`);
@@ -177,7 +203,9 @@ async function runTurn(
   }, opts.timeoutMs);
   timer.unref?.();
 
-  /** The model's answer: the last assistant prose written to the transcript. */
+  // The answer is read from the transcript after the turn, not captured from a
+  // `done` event: `session.run` builds its own event sink and does not forward
+  // one here. `emit` below is used only for verbose progress.
   let answer = "";
 
   const emit = (ev: AgentEvent) => {
@@ -192,7 +220,6 @@ async function runTurn(
         if (opts.verbose) log(`  <- ${ev.name} ${ev.ok ? "ok" : "failed"}`);
         break;
       case "done":
-        answer = lastAssistantText(session.entries);
         break;
       case "error":
         log(`coda headless: ${ev.message}`);
@@ -202,7 +229,7 @@ async function runTurn(
 
   try {
     await session.run(
-      opts.prompt,
+      withReportPath(opts.prompt, opts.reportPath),
       () => {
         // `Session.run` calls this on every event as well as at the start and
         // end of the turn, which is the closest thing to a heartbeat available.
@@ -230,7 +257,12 @@ async function runTurn(
     log(`coda headless: timed out after ${Math.round(opts.timeoutMs / 1000)}s`);
     return EXIT.timeout;
   }
-  return finish(session, opts, answer, log);
+  // Read the answer here, not from a `done` event: `session.run` owns the event
+  // sink and does not forward it, so a `done` case in this file would never fire
+  // and `answer` would stay empty on every run -- reporting success as
+  // "no final answer" (see #headless-no-answer).
+  answer = lastAssistantText(session.entries);
+  return finish(session, opts, answer, log, startedAt);
 }
 
 /**
@@ -254,7 +286,8 @@ function finish(
   session: Session,
   opts: HeadlessOptions,
   answer: string,
-  log: (msg: string) => void
+  log: (msg: string) => void,
+  startedAt?: number
 ): number {
   // A turn that ended in an error entry is a failure even though `run` returned:
   // `Session.run` records a failed turn in the transcript rather than throwing,
@@ -284,7 +317,7 @@ function finish(
   }
 
   if (opts.reportPath) {
-    const code = enforceReport(opts.reportPath, session, answer, log);
+    const code = enforceReport(opts.reportPath, session, answer, log, startedAt);
     if (code !== EXIT.ok) return code;
   }
 
@@ -311,9 +344,22 @@ export function enforceReport(
   reportPath: string,
   session: Session,
   answer: string,
-  log: (msg: string) => void
+  log: (msg: string) => void,
+  /**
+   * When the run began, in ms. A file is "from this run" if it was written at or
+   * after this moment.
+   *
+   * This is deliberately NOT `session.updatedAt`: that is stamped when the turn
+   * finishes, *after* the model wrote the report mid-turn, so a perfectly good
+   * report could read as stale. Measured in practice, the report's mtime landed
+   * ~650ms before `updatedAt`, and a slower turn would exceed the old 1s fudge
+   * and fail a successful run. Defaults to `updatedAt` for callers that have no
+   * start time (tests), where the distinction does not arise.
+   */
+  startedAt?: number
 ): number {
   const target = path.resolve(reportPath);
+  const since = startedAt ?? session.updatedAt;
 
   // Anything in this run that could have written a file.
   const couldWrite = session.entries.some(
@@ -323,7 +369,7 @@ export function enforceReport(
   );
 
   const stat = statOrNull(target);
-  const fresh = stat !== null && stat.size > 0 && stat.mtimeMs >= session.updatedAt - 1000;
+  const fresh = stat !== null && stat.size > 0 && stat.mtimeMs >= since - 1000;
 
   if (!fresh) {
     if (stat && stat.size > 0) {
