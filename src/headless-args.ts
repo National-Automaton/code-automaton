@@ -98,7 +98,10 @@ export function parseHeadlessArgs(
     reportPath: null,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     allow: new Set(DEFAULT_ALLOW),
-    failOnDenied: true,
+    // Off by default: the model may have worked around a refusal successfully.
+    // `--deny-ok` makes a refusal fatal. (Both this default and the flag handler
+    // were inverted, so the flag silently turned the check off instead of on.)
+    failOnDenied: false,
     verbose: false,
   };
   let print = false;
@@ -200,7 +203,7 @@ export function parseHeadlessArgs(
         break;
       }
       case "--deny-ok":
-        opts.failOnDenied = false;
+        opts.failOnDenied = true;
         break;
       case "-V":
       case "--verbose":

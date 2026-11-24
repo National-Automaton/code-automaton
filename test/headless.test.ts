@@ -303,6 +303,63 @@ const fakeSession = (entries: any[], updatedAt = Date.now()) => ({ entries, upda
   assert.equal(enforceReport(target, s, "done", () => {}), 1);
 }
 
+// --- regressions -----------------------------------------------------------
+
+{
+  // A report written mid-turn is OLDER than session.updatedAt, because that is
+  // stamped when the turn finishes. Passing the run's start time must keep such
+  // a report valid; measuring against updatedAt failed a good run. (Regression:
+  // #headless-freshness)
+  const target = path.join(root, "mid-turn.md");
+  writeFileSync(target, "# written during the turn\n");
+  // The file must sit clearly BETWEEN start and finish, which is what a slow
+  // turn does: the model writes the report at t+30s and the turn ends at t+60s.
+  // Writing it "now" and comparing against a startedAt of "now - 60s" would be
+  // inside the 1s grace on both sides and would pass even with the bug present.
+  const startedAt = Date.now() - 60_000;             // run began a minute ago
+  const updatedAt = Date.now();                      // ...and finished now
+  const midTurn = new Date(startedAt + 30_000);
+  utimesSync(target, midTurn, midTurn);
+  const s = fakeSession(
+    [
+      { role: "tool", name: "write_file", text: `wrote ${target}` },
+      { role: "assistant", text: "done" },
+    ],
+    updatedAt
+  );
+  assert.equal(
+    enforceReport(target, s, "done", () => {}, startedAt),
+    0,
+    "a file written after the run started is this run's report"
+  );
+}
+
+{
+  // Even with a start time, a file older than the run is still a failure.
+  const target = path.join(root, "too-old.md");
+  writeFileSync(target, "# ancient\n");
+  const old = new Date(Date.now() - 7 * 24 * 3600_000);
+  utimesSync(target, old, old);
+  const s = fakeSession([{ role: "assistant", text: "answer" }]);
+  assert.equal(
+    enforceReport(target, s, "answer", () => {}, Date.now() - 60_000),
+    1,
+    "the startedAt grace must not bless a genuinely old file"
+  );
+}
+
+{
+  // `lastAssistantText` must ignore tool rows and pick the model's prose, since
+  // the headless runner now reads the answer from the transcript rather than
+  // from a `done` event. (Regression: answer was never captured at all.)
+  const entries = [
+    { role: "user", text: "go" },
+    { role: "tool", name: "write_file", text: "wrote x" },
+    { role: "assistant", text: "the final answer" },
+  ];
+  assert.equal(lastAssistantText(entries), "the final answer");
+}
+
 // --- helpers ---------------------------------------------------------------
 
 {
@@ -318,3 +375,14 @@ const fakeSession = (entries: any[], updatedAt = Date.now()) => ({ entries, upda
 }
 
 console.log("headless: ok");
+
+{
+  // `--report-path` must reach the model, or an unattended run has no way to
+  // know where to write and will (correctly) refuse to write anywhere.
+  const { withReportPath } = await import("../src/headless.js");
+  const out = withReportPath("do the thing", "/tmp/some dir/report.txt");
+  assert.match(out, /REPORT DESTINATION/);
+  assert.match(out, /\/tmp\/some dir\/report\.txt/);
+  assert.match(out, /^do the thing/, "the original prompt is preserved");
+  assert.equal(withReportPath("x", null), "x", "no path, no change");
+}
